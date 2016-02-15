@@ -1,6 +1,6 @@
 # FixCameraDate
 
-* Download [FixCameraDate.exe](FixCameraDate.exe) [22k]
+* Download [FixCameraDate.exe](https://github.com/ljw1004/fix-camera-date/raw/master/FixCameraDate.exe) [22k]
 
 Do you have photos or videos of an event from several phones/cameras? Do you want to consolidate them into the right order? FixCameraDate will help!
 
@@ -27,7 +27,7 @@ FixCameraDate is a command-line tool to help you put all your photos and videos 
 
 ## Installation
 
-Download [FixCameraDate.exe](FixCameraDate.exe). Once it's downloaded onto your computer, copy it into your Windows folder, `C:\Windows\FixCameraDate.exe`
+Download [FixCameraDate.exe](https://github.com/ljw1004/fix-camera-date/raw/master/FixCameraDate.exe). Once it's downloaded onto your computer, copy it into your Windows folder, `C:\Windows\FixCameraDate.exe`
 
  (Advanced option: actually you can save it to any folder you want, but if so you'd have to add it to Control Panel > Advanced system settings > Environment Variables > System Variables > Path).
 
