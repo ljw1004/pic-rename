@@ -36,10 +36,10 @@ Download [FixCameraDate.exe](FixCameraDate.exe). Once it's downloaded onto your 
 
 1. Open a command-prompt and navigate to the folder with all your photos and videos. 
 2. Type this command:
-    ```
-    FixCameraDate * /rename
-    ```
-    ![rename command](readme4.png)
+```
+FixCameraDate * /rename
+```
+![rename command](readme4.png)
 
 This will rename all photos and videos in that folder so they're now in the correct order. (at least they will be if you're viewing them sorted by filename!)
 
@@ -58,9 +58,9 @@ Actually, I noticed that the first four photos are in the wrong timezone, off by
     ![timezone folder](readme6.png)
 
 2. Type this command:
-    ```
-    FixCameraDate Timezone\* /hour+8 /rename
-    ```
+```
+FixCameraDate Timezone\* /hour+8 /rename
+```
     ![timezone command](readme7.png)
 
 3. That has fixed up the timezone on the affected photos and videos, marking them as 8 hours later. Now you can cut/paste them back into the main photo folder.
