@@ -40,6 +40,7 @@ Download [FixCameraDate.exe](FixCameraDate.exe). Once it's downloaded onto your 
 ```
 FixCameraDate * /rename
 ```
+
 ![rename command](readme4.png)
 
 This will rename all photos and videos in that folder so they're now in the correct order. (at least they will be if you're viewing them sorted by filename!)
@@ -56,14 +57,17 @@ Note that FixCameraDate uses International Standard date-order (YYYY-MM-DD) and 
 Actually, I noticed that the first four photos are in the wrong timezone, off by 8 hours. So I'm going to fix that up.
 
 (1) Move the wrong-timezone photos and videos into their own separate directory, just for now. I use the name "Timezone" for this directory.
+
 ![timezone folder](readme6.png)
 
 (2) Type this command:
 ```
 FixCameraDate Timezone\* /hour+8 /rename
 ```
+
 ![timezone command](readme7.png)
 
 That has fixed up the timezone on the affected photos and videos, marking them as 8 hours later. Now you can cut/paste them back into the main photo folder.
+
 ![timezone result](readme8.png)
 
