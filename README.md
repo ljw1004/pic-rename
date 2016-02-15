@@ -36,7 +36,8 @@ Download [FixCameraDate.exe](FixCameraDate.exe). Once it's downloaded onto your 
 
 1. Open a command-prompt and navigate to the folder with all your photos and videos. 
 2. Type this command:
-    ```FixCameraDate * /rename
+    ```
+    FixCameraDate * /rename
     ```
     ![rename command](readme4.png)
 
