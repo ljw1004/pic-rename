@@ -18,7 +18,6 @@ Module Module1
     End Sub
 
     Sub Main(args As String())
-        Test() : Return
         ' Goals:
         ' (1) If you have shots from one or more devices, rename them to local time when the shot was taken
         ' (2) If you had taken shots on holiday without having fixed the timezone on your camera, fix their metadata timestamps
