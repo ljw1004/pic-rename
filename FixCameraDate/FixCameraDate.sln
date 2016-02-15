@@ -16,6 +16,7 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution 
 		..\readme6.png = ..\readme6.png
 		..\readme7.png = ..\readme7.png
 		..\readme8.png = ..\readme8.png
+		..\spec.md = ..\spec.md
 	EndProjectSection
 EndProject
 Global

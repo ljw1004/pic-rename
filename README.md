@@ -20,7 +20,7 @@ So what can be done?
 
 FixCameraDate is a command-line tool to help you put all your photos and videos in the correct order, even if they came from different devices, even if some devices might have been set to the wrong timezone.
 
- The instructions here show you how to use it. If you want to learn more about how things work under the hood, or if the tool isn't doing what you think it should be doing, see the "Documentation" page.
+ The instructions here show you how to use it. If you want to learn more about how things work under the hood, or if the tool isn't doing what you think it should be doing, read the [specification](spec.md).
 
  Note: this is a command-line utility. If you've never used a command-prompt before, then this tool probably isn't the best one for you..
 
