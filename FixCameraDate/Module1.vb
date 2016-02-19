@@ -18,6 +18,8 @@ Module Module1
     End Sub
 
     Sub Main(args As String())
+        Dim t1 = MetadataTime($"test\eg-wm10-gps.jpg")
+        Return
         ' Goals:
         ' (1) If you have shots from one or more devices, rename them to local time when the shot was taken
         ' (2) If you had taken shots on holiday without having fixed the timezone on your camera, fix their metadata timestamps
@@ -293,8 +295,8 @@ Module Module1
             If fend < 8 Then Return EmptyResult
             file.Seek(0, IO.SeekOrigin.Begin)
             Dim h1 = file.Read2byte(), h2 = file.Read2byte(), h3 = file.Read4byte()
-            If h1 = &HFFD8 Then Return ExifTime(file, 0, fend)
-            If h3 = &H66747970 Then Return Mp4Time(file, 0, fend)
+            If h1 = &HFFD8 Then Return ExifTime(file, 0, fend) ' jpeg header
+            If h3 = &H66747970 Then Return Mp4Time(file, 0, fend) ' "ftyp" prefix of mp4, mov
             Return Nothing
         End Using
     End Function
@@ -302,6 +304,7 @@ Module Module1
     Function ExifTime(file As IO.Stream, start As Long, fend As Long) As Tuple(Of DateTimeKind?, UpdateTimeFunc)
         Dim timeLastModified, timeOriginal, timeDigitized As DateTime?
         Dim posLastModified = 0L, posOriginal = 0L, posDigitized = 0L
+        Dim gpsNS = "", gpsEW = "", gpsLatVal As Double? = Nothing, gpsLongVal As Double? = Nothing
 
         Dim pos = start + 2
         While True ' Iterate through the EXIF markers
@@ -329,8 +332,10 @@ Module Module1
             ' Format of EXIF is a chain of IFDs. Each consists of a number of tagged entries.
             ' One of the tagged entries may be "SubIFDpos = &H..." which gives the address of the
             ' next IFD in the chain; if this entry is absent or 0, then we're on the last IFD.
+            ' Another tagged entry may be "GPSInfo = &H..." which gives the address of the GPS IFD
             '
             Dim subifdpos As UInteger = 0
+            Dim gpsifdpos As UInteger = 0
             While True ' iterate through the IFDs
                 'Console.WriteLine("  IFD @{0:X}\n", ipos)
                 Dim ibuf_pos = mbuf_pos + 10 + ipos
@@ -346,9 +351,27 @@ Module Module1
                     Dim format = file.Read2byte(ExifDataIsLittleEndian)
                     Dim ncomps = file.Read4byte(ExifDataIsLittleEndian)
                     Dim data = file.Read4byte(ExifDataIsLittleEndian)
-                    If tag = &H8769 Then subifdpos = data
                     'Console.WriteLine("    TAG {0:X} format={1:X} ncomps={2:X} data={3:X}", tag, format, ncomps, data)
-                    If (tag = &H132 OrElse tag = &H9003 OrElse tag = &H9004) AndAlso format = 2 AndAlso ncomps = 20 AndAlso 10 + data + ncomps < msize Then
+                    If tag = &H8769 AndAlso format = 4 Then
+                        subifdpos = data
+                    ElseIf tag = &H8825 AndAlso format = 4 Then
+                        gpsifdpos = data
+                    ElseIf (tag = 1 OrElse tag = 3) AndAlso format = 2 AndAlso ncomps = 2 Then
+                        Dim s = ChrW(CInt(data >> 24))
+                        If tag = 1 Then gpsNS = s Else gpsEW = s
+                    ElseIf (tag = 2 OrElse tag = 4) AndAlso format = 5 AndAlso ncomps = 3 AndAlso 10 + data + ncomps < msize Then
+                        Dim ddpos = mbuf_pos + 10 + data
+                        file.Seek(ddpos, IO.SeekOrigin.Begin)
+                        Dim degTop = file.Read4byte(ExifDataIsLittleEndian)
+                        Dim degBot = file.Read4byte(ExifDataIsLittleEndian)
+                        Dim minTop = file.Read4byte(ExifDataIsLittleEndian)
+                        Dim minBot = file.Read4byte(ExifDataIsLittleEndian)
+                        Dim secTop = file.Read4byte(ExifDataIsLittleEndian)
+                        Dim secBot = file.Read4byte(ExifDataIsLittleEndian)
+                        Dim deg = degTop / degBot + minTop / minBot / 60.0 + secTop / secBot / 3600.0
+                        If tag = 2 Then gpsLatVal = deg
+                        If tag = 4 Then gpsLongVal = deg
+                    ElseIf (tag = &H132 OrElse tag = &H9003 OrElse tag = &H9004) AndAlso format = 2 AndAlso ncomps = 20 AndAlso 10 + data + ncomps < msize Then
                         Dim ddpos = mbuf_pos + 10 + data
                         file.Seek(ddpos, IO.SeekOrigin.Begin)
                         Dim buf(18) As Byte : file.Read(buf, 0, 19)
@@ -364,6 +387,7 @@ Module Module1
                 Next
                 If ipos = 0 Then
                     ipos = subifdpos : subifdpos = 0
+                    If ipos = 0 Then ipos = gpsifdpos : gpsifdpos = 0
                     If ipos = 0 Then Exit While ' indicates the last IFD in this marker
                 End If
             End While
@@ -391,6 +415,19 @@ Module Module1
                 End If
                 Return True
             End Function
+
+        Dim gpsLat As Double? = Nothing, gpsLong As Double? = Nothing
+        If (gpsNS = "N" OrElse gpsNS = "S") AndAlso gpsLatVal.HasValue AndAlso (gpsEW = "E" OrElse gpsEW = "W") AndAlso gpsLongVal.HasValue Then
+            gpsLat = If(gpsNS = "N", gpsLatVal.Value, -gpsLatVal.Value)
+            gpsLong = If(gpsEW = "E", gpsLongVal.Value, -gpsLongVal.Value)
+            Console.WriteLine($"lat={gpsLat}, long={gpsLong}")
+            ' TODO: figure out what to do with these!
+            ' We should be doing a BATCH reverse geocode.
+            ' That means: no longer doing files one-by-one; instead, saving them to do later.
+            ' We also need a Bing Maps API key, and need to figure out the REST API for it.
+            ' https://msdn.microsoft.com/en-us/library/ff701734.aspx
+            ' https://blogs.bing.com/maps/2010/08/31/batch-geocoding-and-batch-reverse-geocoding-with-bing-maps/
+        End If
 
         Return Tuple.Create(winnerTimeOffset, lambda)
     End Function
