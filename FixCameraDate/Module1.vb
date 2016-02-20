@@ -1,4 +1,7 @@
 ﻿Option Strict On
+Imports System.Net.Http
+Imports System.Threading
+Imports <xmlns="http://schemas.microsoft.com/search/local/ws/rest/v1">
 
 Module Module1
 
@@ -12,14 +15,12 @@ Module Module1
                         "eg-wp8 - 2013.12.15 - 07.33 PST.jpg", "eg-wp8 - 2013.12.15 - 07.33 PST.mp4",
                         "eg-screenshot.png", "eg-notapic.txt"}
             Dim ft = FilestampTime($"test\{fn}")?.Item1
-            Dim mt = MetadataTime($"test\{fn}")?.Item1
+            Dim mt = MetadataTimeAndGps($"test\{fn}")?.Item1
             Console.WriteLine($"{fn}{vbCrLf}    ft={ft}{vbCrLf}    mt={mt}")
         Next
     End Sub
 
     Sub Main(args As String())
-        Dim t1 = MetadataTime($"test\eg-wm10-gps.jpg")
-        Return
         ' Goals:
         ' (1) If you have shots from one or more devices, rename them to local time when the shot was taken
         ' (2) If you had taken shots on holiday without having fixed the timezone on your camera, fix their metadata timestamps
@@ -42,6 +43,7 @@ Module Module1
 
         ' Our objective is to rename the file according to "local" time when the photo/video was taken, without the timezone information.
 
+        If BingMapsKey.BingMapsKey = "" Then Console.WriteLine("THIS VERSION HAS BEEN BUILT WITHOUT GPS SUPPORT")
         Dim cmdFn = "", cmdPattern = "", cmdOffset As TimeSpan? = Nothing, cmdError = ""
         Dim cmdArgs = New LinkedList(Of String)(args)
         ' Get the filename
@@ -51,7 +53,7 @@ Module Module1
             Dim switch = cmdArgs.First.Value : cmdArgs.RemoveFirst()
             If switch = "/rename" Then
                 If cmdPattern <> "" Then cmdError = "duplicate /rename" : Exit While
-                cmdPattern = "%{datetime} - %{fn}"
+                cmdPattern = "%{datetime} - %{fn} - %{place}"
                 If cmdArgs.Count > 0 AndAlso Not cmdArgs.First.Value.StartsWith("/") Then cmdPattern = cmdArgs.First.Value : cmdArgs.RemoveFirst()
             ElseIf switch.StartsWith("/day") OrElse switch.StartsWith("/hour") OrElse switch.StartsWith("/minute") Then
                 Dim len = 0, mkts As Func(Of Integer, TimeSpan) = Function(n) Nothing
@@ -74,8 +76,8 @@ Module Module1
         If cmdFn = "" Then
             Console.WriteLine("FixCameraDate ""a.jpg"" [/rename [""pattern""]] [/day+n] [/hour+n] [/minute+n]")
             Console.WriteLine("  Filename can include * and ? wildcards")
-            Console.WriteLine("  /rename: pattern defaults to ""%{datetime} - %{fn}"" and")
-            Console.WriteLine("           can include %{date/time/year/month/day/hour/minute/second}")
+            Console.WriteLine("  /rename: pattern defaults to ""%{datetime} - %{fn} - %{place}"" and")
+            Console.WriteLine("           can include %{date/time/year/month/day/hour/minute/second/place}")
             Console.WriteLine("  /day,/hour,/minute: adjust the timestamp; can be + or -")
             Console.WriteLine()
             Console.WriteLine("EXAMPLES:")
@@ -93,51 +95,73 @@ Module Module1
         End If
         Dim globFiles = IO.Directory.GetFiles(globPath, globMatch)
         If globFiles.Length = 0 Then Console.WriteLine("Not found - ""{0}""", cmdFn)
-        For Each globFile In globFiles
-            Dim origFn = globFile
 
-            Dim mtt = MetadataTime(origFn)
-            Dim ftt = FilestampTime(origFn)
-            If mtt Is Nothing Then Console.WriteLine("Not an image/video - ""{0}""", IO.Path.GetFileName(origFn)) : Continue For
-            Dim mt = mtt.Item1, ft = ftt.Item1
-            Dim setter As UpdateTimeFunc = Nothing
-            Dim localTime As DateTime
-            If mt.HasValue Then
-                setter = mtt.Item2
-                If mt.Value.dt.Kind = System.DateTimeKind.Unspecified OrElse mt.Value.dt.Kind = System.DateTimeKind.Local Then
-                    ' If dt.kind=Unspecified (e.g. EXIF, Sony), then the time is by assumption already local from when the picture was shot
-                    ' If dt.kind=Local (e.g. iPhone-MOV), then the time is local, and also indicates its timezone offset
-                    localTime = mt.Value.dt
-                ElseIf mt.Value.dt.Kind = System.DateTimeKind.Utc Then
-                    ' If dt.Kind=UTC (e.g. Android), then time is in UTC, and we don't know how to read timezone.
-                    localTime = mt.Value.dt.ToLocalTime() ' Best we can do is guess the timezone of the computer
-                End If
-            Else
-                setter = ftt.Item2
-                If ft.dt.Kind = System.DateTimeKind.Unspecified Then
-                    ' e.g. Windows Phone when we got the date from the filename
-                    localTime = ft.dt
-                ElseIf ft.dt.Kind = System.DateTimeKind.Utc Then
-                    ' e.g. all other files where we got the date from the filestamp
-                    localTime = ft.dt.ToLocalTime() ' the best we can do is guess that the photo was taken in the timezone as this computer now
+        Dim filesToDo As New Queue(Of FileToDo)
+        Dim gpsToDo As New Dictionary(Of Integer, FileToDo)
+        Dim gpsNextRequestId = 1
+        For Each globFile In globFiles
+            filesToDo.Enqueue(New FileToDo With {.fn = globFile})
+        Next
+
+
+        While filesToDo.Count > 0 OrElse gpsToDo.Count > 0
+            If filesToDo.Count = 0 Then DoGps(gpsToDo, filesToDo)
+            Dim fileToDo = filesToDo.Dequeue()
+
+            If Not fileToDo.hasInitialScan Then
+                fileToDo.hasInitialScan = True
+                Dim mtt = MetadataTimeAndGps(fileToDo.fn)
+                Dim ftt = FilestampTime(fileToDo.fn)
+                If mtt Is Nothing Then Console.WriteLine("Not an image/video - ""{0}""", IO.Path.GetFileName(fileToDo.fn)) : Continue While
+                Dim mt = mtt.Item1, ft = ftt.Item1
+                If mt.HasValue Then
+                    fileToDo.setter = mtt.Item2
+                    fileToDo.gpsCoordinates = mtt.Item3
+                    If mt.Value.dt.Kind = System.DateTimeKind.Unspecified OrElse mt.Value.dt.Kind = System.DateTimeKind.Local Then
+                        ' If dt.kind=Unspecified (e.g. EXIF, Sony), then the time is by assumption already local from when the picture was shot
+                        ' If dt.kind=Local (e.g. iPhone-MOV), then the time is local, and also indicates its timezone offset
+                        fileToDo.localTime = mt.Value.dt
+                    ElseIf mt.Value.dt.Kind = System.DateTimeKind.Utc Then
+                        ' If dt.Kind=UTC (e.g. Android), then time is in UTC, and we don't know how to read timezone.
+                        fileToDo.localTime = mt.Value.dt.ToLocalTime() ' Best we can do is guess the timezone of the computer
+                    End If
                 Else
-                    Throw New Exception("Expected filetimes to be in UTC")
+                    fileToDo.setter = ftt.Item2
+                    If ft.dt.Kind = System.DateTimeKind.Unspecified Then
+                        ' e.g. Windows Phone when we got the date from the filename
+                        fileToDo.localTime = ft.dt
+                    ElseIf ft.dt.Kind = System.DateTimeKind.Utc Then
+                        ' e.g. all other files where we got the date from the filestamp
+                        fileToDo.localTime = ft.dt.ToLocalTime() ' the best we can do is guess that the photo was taken in the timezone as this computer now
+                    Else
+                        Throw New Exception("Expected filetimes to be in UTC")
+                    End If
                 End If
             End If
 
+            ' The only thing that requires GPS is if (1) we're doing a rename, (2) the
+            ' pattern includes place, (3) the file actually has a GPS signature
+            If cmdPattern.Contains("%{place}") AndAlso fileToDo.gpsCoordinates IsNot Nothing AndAlso fileToDo.hasGpsResult Is Nothing AndAlso Not String.IsNullOrEmpty(BingMapsKey.BingMapsKey) Then
+                gpsNextRequestId += 1
+                gpsToDo.Add(gpsNextRequestId, fileToDo)
+                If gpsToDo.Count >= 50 Then DoGps(gpsToDo, filesToDo)
+                Continue While
+            End If
+
+            ' Otherwise, by assumption here, either we have GPS result or we don't need it
 
             If cmdPattern = "" AndAlso Not cmdOffset.HasValue Then
-                Console.WriteLine("""{0}"": {1:yyyy.MM.dd - HH.mm.ss}", IO.Path.GetFileName(origFn), localTime)
+                Console.WriteLine("""{0}"": {1:yyyy.MM.dd - HH.mm.ss}", IO.Path.GetFileName(fileToDo.fn), fileToDo.localTime)
             End If
 
 
             If cmdOffset.HasValue Then
-                Using file = New IO.FileStream(origFn, IO.FileMode.Open, IO.FileAccess.ReadWrite)
-                    Dim prevTime = localTime
-                    Dim r = setter(file, cmdOffset.Value)
+                Using file = New IO.FileStream(fileToDo.fn, IO.FileMode.Open, IO.FileAccess.ReadWrite)
+                    Dim prevTime = fileToDo.localTime
+                    Dim r = fileToDo.setter(file, cmdOffset.Value)
                     If r Then
-                        localTime += cmdOffset.Value
-                        If cmdPattern = "" Then Console.WriteLine("""{0}"": {1:yyyy.MM.dd - HH.mm.ss}, corrected from {2:yyyy.MM.dd - HH.mm.ss}", IO.Path.GetFileName(origFn), localTime, prevTime)
+                        fileToDo.localTime += cmdOffset.Value
+                        If cmdPattern = "" Then Console.WriteLine("""{0}"": {1:yyyy.MM.dd - HH.mm.ss}, corrected from {2:yyyy.MM.dd - HH.mm.ss}", IO.Path.GetFileName(fileToDo.fn), fileToDo.localTime, prevTime)
                     End If
                 End Using
             End If
@@ -161,24 +185,58 @@ Module Module1
                     pattern = pattern.Substring(0, pattern.Length - potentialExt.Length)
                     Exit For
                 Next
-                If patternExt Is Nothing Then patternExt = IO.Path.GetExtension(origFn)
+                If patternExt Is Nothing Then patternExt = IO.Path.GetExtension(fileToDo.fn)
                 '
                 ' 2. Parse the pattern-string into its constitutent parts
-                Dim patternSplit = pattern.Split({"%"c})
-                For i = 1 To patternSplit.Length - 1 : patternSplit(i) = "%" & patternSplit(i) : Next
-                Dim patternParts As New LinkedList(Of Tuple(Of Func(Of String, DateTime, String), Integer, Func(Of String, Boolean)))
+                Dim patternSplit0 = pattern.Split({"%"c})
+                Dim patternSplit As New List(Of String)
+                If patternSplit0(0).Length > 0 Then patternSplit.Add(patternSplit0(0))
+                For i = 1 To patternSplit0.Length - 1
+                    Dim s = "%" & patternSplit0(i)
+                    If Not s.StartsWith("%{") Then Console.WriteLine("ERROR: wrong pattern") : Return
+                    Dim ib = s.IndexOf("}")
+                    patternSplit.Add(s.Substring(0, ib + 1))
+                    If ib <> s.Length - 1 Then patternSplit.Add(s.Substring(ib + 1))
+                Next
+                Dim patternParts As New LinkedList(Of PatternPart)
+
                 For Each rsplit In patternSplit
-                    Dim remainder = ""
+                    Dim part As New PatternPart
+                    part.pattern = rsplit
+
                     If Not rsplit.StartsWith("%") Then
-                        If rsplit.Length > 0 Then patternParts.Add(Function() rsplit, rsplit.Length, Function(s) s = rsplit)
+                        part.generator = Function() rsplit
+                        part.matcher = Function(rr)
+                                           If rr.Length < rsplit.Length Then Return -1
+                                           If rr.Substring(0, rsplit.Length) = rsplit Then Return rsplit.Length
+                                           Return -1
+                                       End Function
+                        Dim prevPart = patternParts.LastOrDefault
+                        If prevPart IsNot Nothing AndAlso prevPart.matcher Is Nothing Then
+                            prevPart.matcher = Function(rr)
+                                                   Dim i = rr.IndexOf(rsplit)
+                                                   If i = -1 Then Return rr.Length
+                                                   Return i
+                                               End Function
+                        End If
+                        patternParts.AddLast(part)
                         Continue For
                     End If
+
                     If rsplit.StartsWith("%{fn}") Then
-                        patternParts.Add(Function(fn2, dt2) fn2, -1, Function() False)
-                        remainder = rsplit.Substring(5)
-                        If remainder.Length > 0 Then patternParts.Add(Function() remainder, remainder.Length, Function(s) s = remainder)
+                        part.generator = Function(fn2, dt2, pl2) fn2
+                        part.matcher = Nothing ' must be filled in by the next part
+                        patternParts.AddLast(part)
                         Continue For
                     End If
+
+                    If rsplit.StartsWith("%{place}") Then
+                        part.generator = Function(fn2, dt2, pl2) pl2
+                        part.matcher = Nothing ' must be filled in by the next part
+                        patternParts.AddLast(part)
+                        Continue For
+                    End If
+
                     Dim escapes = {"%{datetime}", "yyyy.MM.dd - HH.mm.ss", "####.##.## - ##.##.##",
                                    "%{date}", "yyyy.MM.dd", "####.##.##",
                                    "%{time}", "HH.mm.ss", "##.##.##",
@@ -197,49 +255,159 @@ Module Module1
                         Exit For
                     Next
                     If escape = "" Then Console.WriteLine("Unrecognized {0}", rsplit) : Return
-                    patternParts.Add(Function(fn2, dt2) dt2.ToString(fmt), islike.Length, Function(s) s Like islike)
-                    remainder = rsplit.Substring(escape.Length)
-                    If remainder.Length > 0 Then patternParts.Add(Function() remainder, remainder.Length, Function(s) s = remainder)
+                    part.generator = Function(fn2, dt2, pl2) dt2.ToString(fmt)
+                    part.matcher = Function(rr)
+                                       If rr.Length < islike.Length Then Return -1
+                                       If rr.Substring(0, islike.Length) Like islike Then Return islike.Length
+                                       Return -1
+                                   End Function
+                    patternParts.AddLast(part)
                 Next
+
+                ' The last part, if it was %{fn} or %{place} will match
+                ' up to the remainder of the original filename
+                Dim lastPart = patternParts.Last.Value
+                If lastPart.matcher Is Nothing Then lastPart.matcher = Function(rr) rr.Length
+
                 '
                 ' 3. Attempt to match the existing filename against the pattern
-                Dim basefn = IO.Path.GetFileNameWithoutExtension(origFn)
-                Dim matchfn = basefn
-                Dim matchParts As New LinkedList(Of Tuple(Of Func(Of String, DateTime, String), Integer, Func(Of String, Boolean)))(patternParts)
-                While matchParts.Count > 1 AndAlso matchfn IsNot Nothing
-                    Dim patternPart As Tuple(Of Func(Of String, DateTime, String), Integer, Func(Of String, Boolean)) = Nothing, atStart = True
-                    If matchParts.First.Value.Item2 <> -1 Then
-                        patternPart = matchParts.First.Value : matchParts.RemoveFirst() : atStart = True
-                    Else
-                        patternPart = matchParts.Last.Value : matchParts.RemoveLast() : atStart = False
-                    End If
-                    Dim partLen = patternPart.Item2
-                    If matchfn.Length < partLen Then matchfn = Nothing : Exit While
-                    Dim match = If(atStart, matchfn.Substring(0, partLen), matchfn.Substring(matchfn.Length - partLen))
-                    If Not patternPart.Item3(match) Then matchfn = Nothing : Exit While
-                    matchfn = If(atStart, matchfn.Substring(partLen), matchfn.Substring(0, matchfn.Length - partLen))
+                Dim basefn = IO.Path.GetFileNameWithoutExtension(fileToDo.fn)
+                Dim matchremainder = basefn
+                Dim matchParts As New LinkedList(Of PatternPart)(patternParts)
+                While matchParts.Count > 0 AndAlso matchremainder.Length > 0
+                    Dim matchPart As PatternPart = matchParts.First.Value
+                    Dim matchLength = matchPart.matcher(matchremainder)
+                    If matchLength = -1 Then Exit While
+                    matchParts.RemoveFirst()
+                    If matchPart.pattern = "%{fn}" Then basefn = matchremainder.Substring(0, matchLength)
+                    matchremainder = matchremainder.Substring(matchLength)
                 End While
-                If matchParts.Count = 1 AndAlso matchParts.First.Value.Item2 = -1 AndAlso matchfn IsNot Nothing Then
-                    basefn = matchfn
+
+                If matchremainder.Length = 0 AndAlso matchParts.Count = 2 AndAlso matchParts(0).pattern = " - " AndAlso matchParts(1).pattern = "%{place}" Then
+                    ' hack if you had pattern like "%{year} - %{fn} - %{place}" so
+                    ' it will match a filename like "2012 - file.jpg" which lacks a place
+                    matchParts.Clear()
+                End If
+
+                If matchParts.Count <> 0 OrElse matchremainder.Length > 0 Then
+                    ' failed to do a complete match
+                    basefn = IO.Path.GetFileNameWithoutExtension(fileToDo.fn)
                 End If
                 '
                 ' 4. Figure out the new filename
-                Dim newfn = IO.Path.GetDirectoryName(origFn) & "\"
-                For Each patternPart In patternParts : newfn &= patternPart.Item1(basefn, localTime) : Next
+                Dim newfn = IO.Path.GetDirectoryName(fileToDo.fn) & "\"
+                For Each patternPart In patternParts
+                    newfn &= patternPart.generator(basefn, fileToDo.localTime, fileToDo.hasGpsResult)
+                Next
+                If patternParts.Count > 2 AndAlso patternParts.Last.Value.pattern = "%{place}" AndAlso patternParts.Last.Previous.Value.pattern = " - " AndAlso String.IsNullOrEmpty(fileToDo.hasGpsResult) Then
+                    If newfn.EndsWith(" - ") Then newfn = newfn.Substring(0, newfn.Length - 3)
+                End If
                 newfn &= patternExt
-                If origFn <> newfn Then
+                If fileToDo.fn <> newfn Then
+                    If IO.File.Exists(newfn) Then Console.WriteLine("Already exists - " & IO.Path.GetFileName(newfn)) : Continue While
                     Console.WriteLine(IO.Path.GetFileName(newfn))
-                    IO.File.Move(origFn, newfn)
+                    IO.File.Move(fileToDo.fn, newfn)
                 End If
             End If
 
+        End While
+    End Sub
+
+    Class PatternPart
+        Public generator As PartGenerator
+        Public matcher As MatchFunction
+        Public pattern As String
+    End Class
+
+    Delegate Function PartGenerator(fn As String, dt As DateTime, place As String) As String
+    Delegate Function MatchFunction(remainder As String) As Integer ' -1 for no-match, otherwise is the number of characters gobbled up
+
+    Class FileToDo
+        ' (1) Upon first creation, FileToDo merely has "fn"
+        ' (2) After initial scan, it also has "localTime, setter, gpsCoordinates"
+        ' This information might be enough for the program to complete its work on this file.
+        ' (3) If not, then the file gets stored in a "to-gps" queue.
+        ' After gps results are back, then gpsResult is populated
+        Public fn As String
+
+        Public hasInitialScan As Boolean
+        Public localTime As DateTime
+        Public setter As UpdateTimeFunc
+        Public gpsCoordinates As GpsCoordinates
+
+        Public hasGpsResult As String
+    End Class
+
+
+    Sub DoGps(gpsToDo0 As Dictionary(Of Integer, FileToDo), filesToDo As Queue(Of FileToDo))
+        Static Dim http As New HttpClient
+        Dim gpsToDo As New Dictionary(Of Integer, FileToDo)(gpsToDo0)
+        gpsToDo0.Clear()
+        Console.Write($"Looking up {gpsToDo.Count} GPS places")
+
+        ' Send the request
+        Dim queryData = "Bing Spatial Data Services, 2.0" & vbCrLf
+        queryData &= "Id|GeocodeRequest/Culture|ReverseGeocodeRequest/IncludeEntityTypes|ReverseGeocodeRequest/Location/Latitude|ReverseGeocodeRequest/Location/Longitude|GeocodeResponse/Address/Neighborhood|GeocodeResponse/Address/Locality|GeocodeResponse/Address/AdminDistrict|GeocodeResponse/Address/CountryRegion" & vbCrLf
+        For Each kv In gpsToDo
+            queryData &= $"{kv.Key}|en-US|neighborhood|{kv.Value.gpsCoordinates.Latitude:0.000000}|{kv.Value.gpsCoordinates.Longitude:0.000000}{vbCrLf}"
         Next
+        Dim key = BingMapsKey.BingMapsKey
+        Dim queryUri = $"http://spatial.virtualearth.net/REST/v1/dataflows/geocode?input=pipe&key={key}"
+        Console.Write(".")
+        Dim statusResp = http.PostAsync(queryUri, New StringContent(queryData)).GetAwaiter().GetResult()
+        If Not statusResp.IsSuccessStatusCode Then Console.WriteLine($"ERROR {statusResp.StatusCode} - {statusResp.ReasonPhrase}") : Return
+        If String.IsNullOrEmpty(statusResp.Headers.Location?.ToString()) Then Console.WriteLine(" ERROR - no location") : Return
+        Dim statusUri = statusResp.Headers.Location.ToString()
+        Console.Write(".")
+
+        ' Ping the location until we get somewhere
+        Dim resultUri = ""
+        While True
+            Thread.Sleep(2000)
+            Console.Write(".")
+            Dim statusRaw = http.GetStringAsync($"{statusUri}?key={key}&output=xml").GetAwaiter().GetResult()
+            Console.Write(".")
+            Dim statusXml = XDocument.Parse(statusRaw)
+            Dim status = statusXml...<Status>.Value
+            If status Is Nothing Then Console.WriteLine("ERROR didn't find status") : Return
+            If status = "Pending" Then Continue While
+            If status = "Failed" Then Console.WriteLine("ERROR 'Failed'") : Return
+            resultUri = (From link In statusXml...<Link>
+                         Where link.@role = "output" AndAlso link.@name = "succeeded"
+                         Select link.Value).FirstOrDefault
+            Exit While
+        End While
+        If String.IsNullOrEmpty(resultUri) Then Console.WriteLine("ERROR no results") : Return
+
+        Dim resultRaw = http.GetStringAsync($"{resultUri}?key={key}&output=json").GetAwaiter().GetResult()
+        Console.Write(".")
+        Dim resultLines = resultRaw.Split({vbCr(0), vbLf(0)}, StringSplitOptions.RemoveEmptyEntries).Skip(2).ToArray()
+        For Each result In resultLines
+            Dim parts = result.Split({"|"c})
+            Dim parts2 As New List(Of String)
+            Dim id = Integer.Parse(parts(0))
+            Dim neighborhood = parts(5) ' Capitol Hill
+            Dim locality = parts(6) ' Seattle
+            Dim adminDistrict = parts(7) ' WA
+            Dim country = parts(8) ' United States
+            If Not String.IsNullOrEmpty(neighborhood) Then parts2.Add(neighborhood)
+            If Not String.IsNullOrEmpty(locality) Then parts2.Add(locality)
+            If Not String.IsNullOrEmpty(adminDistrict) Then parts2.Add(adminDistrict)
+            If Not String.IsNullOrEmpty(country) Then parts2.Add(country)
+            Dim place = String.Join(", ", parts2)
+            If Not String.IsNullOrEmpty(place) Then
+                gpsToDo(id).hasGpsResult = place
+                filesToDo.Enqueue(gpsToDo(id))
+            End If
+        Next
+        Console.WriteLine("done")
+
 
     End Sub
 
     Delegate Function UpdateTimeFunc(stream As IO.Stream, off As TimeSpan) As Boolean
 
-    ReadOnly EmptyResult As New Tuple(Of DateTimeKind?, UpdateTimeFunc)(Nothing, Function() False)
+    ReadOnly EmptyResult As New Tuple(Of DateTimeKind?, UpdateTimeFunc, GpsCoordinates)(Nothing, Function() False, Nothing)
 
     Function FilestampTime(fn As String) As Tuple(Of DateTimeKind, UpdateTimeFunc)
         Dim creationTime = IO.File.GetCreationTime(fn)
@@ -289,8 +457,13 @@ Module Module1
         Return Tuple.Create(localTime, lambda)
     End Function
 
-    Function MetadataTime(fn As String) As Tuple(Of DateTimeKind?, UpdateTimeFunc)
-        Using file As New IO.FileStream(fn, IO.FileMode.Open)
+    Class GpsCoordinates
+        Public Latitude As Double
+        Public Longitude As Double
+    End Class
+
+    Function MetadataTimeAndGps(fn As String) As Tuple(Of DateTimeKind?, UpdateTimeFunc, GpsCoordinates)
+        Using file As New IO.FileStream(fn, IO.FileMode.Open, IO.FileAccess.Read)
             file.Seek(0, IO.SeekOrigin.End) : Dim fend = file.Position
             If fend < 8 Then Return EmptyResult
             file.Seek(0, IO.SeekOrigin.Begin)
@@ -301,7 +474,7 @@ Module Module1
         End Using
     End Function
 
-    Function ExifTime(file As IO.Stream, start As Long, fend As Long) As Tuple(Of DateTimeKind?, UpdateTimeFunc)
+    Function ExifTime(file As IO.Stream, start As Long, fend As Long) As Tuple(Of DateTimeKind?, UpdateTimeFunc, GpsCoordinates)
         Dim timeLastModified, timeOriginal, timeDigitized As DateTime?
         Dim posLastModified = 0L, posOriginal = 0L, posDigitized = 0L
         Dim gpsNS = "", gpsEW = "", gpsLatVal As Double? = Nothing, gpsLongVal As Double? = Nothing
@@ -416,23 +589,17 @@ Module Module1
                 Return True
             End Function
 
-        Dim gpsLat As Double? = Nothing, gpsLong As Double? = Nothing
+        Dim gps As GpsCoordinates = Nothing
         If (gpsNS = "N" OrElse gpsNS = "S") AndAlso gpsLatVal.HasValue AndAlso (gpsEW = "E" OrElse gpsEW = "W") AndAlso gpsLongVal.HasValue Then
-            gpsLat = If(gpsNS = "N", gpsLatVal.Value, -gpsLatVal.Value)
-            gpsLong = If(gpsEW = "E", gpsLongVal.Value, -gpsLongVal.Value)
-            Console.WriteLine($"lat={gpsLat}, long={gpsLong}")
-            ' TODO: figure out what to do with these!
-            ' We should be doing a BATCH reverse geocode.
-            ' That means: no longer doing files one-by-one; instead, saving them to do later.
-            ' We also need a Bing Maps API key, and need to figure out the REST API for it.
-            ' https://msdn.microsoft.com/en-us/library/ff701734.aspx
-            ' https://blogs.bing.com/maps/2010/08/31/batch-geocoding-and-batch-reverse-geocoding-with-bing-maps/
+            gps = New GpsCoordinates
+            gps.Latitude = If(gpsNS = "N", gpsLatVal.Value, -gpsLatVal.Value)
+            gps.Longitude = If(gpsEW = "E", gpsLongVal.Value, -gpsLongVal.Value)
         End If
 
-        Return Tuple.Create(winnerTimeOffset, lambda)
+        Return Tuple.Create(winnerTimeOffset, lambda, gps)
     End Function
 
-    Function Mp4Time(file As IO.Stream, start As Long, fend As Long) As Tuple(Of DateTimeKind?, UpdateTimeFunc)
+    Function Mp4Time(file As IO.Stream, start As Long, fend As Long) As Tuple(Of DateTimeKind?, UpdateTimeFunc, GpsCoordinates)
         ' The file is made up of a sequence of boxes, with a standard way to find size and FourCC "kind" of each.
         ' Some box kinds contain a kind-specific blob of binary data. Other box kinds contain a sequence
         ' of sub-boxes. You need to look up the specs for each kind to know whether it has a blob or sub-boxes.
@@ -564,7 +731,7 @@ Module Module1
                 Return True
             End Function
 
-        Return Tuple.Create(winnerTime, lambda)
+        Return Tuple.Create(winnerTime, lambda, CType(Nothing, GpsCoordinates))
     End Function
 
 
@@ -689,4 +856,43 @@ Module Module1
         End Function
     End Structure
 
+
+    Public Class AsyncPump
+        Public Shared Sub Run(func As Func(Of Task))
+            Dim prevCtx = SynchronizationContext.Current
+            Try
+                Dim syncCtx As New SingleThreadSynchronizationContext()
+                SynchronizationContext.SetSynchronizationContext(syncCtx)
+                Dim t = func()
+                If t Is Nothing Then Throw New InvalidOperationException("No task provided.")
+                t.ContinueWith(Sub() syncCtx.Complete(), TaskScheduler.Default)
+                syncCtx.RunOnCurrentThread()
+                t.GetAwaiter().GetResult()
+            Finally
+                SynchronizationContext.SetSynchronizationContext(prevCtx)
+            End Try
+        End Sub
+
+        Private NotInheritable Class SingleThreadSynchronizationContext : Inherits SynchronizationContext
+            Private ReadOnly m_queue As New Concurrent.BlockingCollection(Of Tuple(Of SendOrPostCallback, Object))
+            Private ReadOnly m_thread As Thread = Thread.CurrentThread
+            Public Overrides Sub Post(d As SendOrPostCallback, state As Object)
+                m_queue.Add(Tuple.Create(d, state))
+            End Sub
+            Public Overrides Sub Send(d As SendOrPostCallback, state As Object)
+                Throw New NotSupportedException("Synchronously sending is not supported.")
+            End Sub
+            Public Sub RunOnCurrentThread()
+                For Each workItem In m_queue.GetConsumingEnumerable()
+                    workItem.Item1.Invoke(workItem.Item2)
+                Next
+            End Sub
+            Public Sub Complete()
+                m_queue.CompleteAdding()
+            End Sub
+        End Class
+    End Class
+
+
 End Module
+
