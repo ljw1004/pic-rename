@@ -28,7 +28,7 @@ FixCameraDate "*.mov" /day+31
 ## `/rename <pattern>`
 You can rename a file according to the date and time it was taken. (If you also specified `/hour` or `/minute`, then those adjustments are done first, and the rename is done second). Here are some example patterns.
 ```
-FixCameraDate *.jpg /rename "%{datetime} - %{fn}"
+FixCameraDate *.jpg /rename "%{datetime} - %{fn} - %{place}"
 FixCameraDate *.jpg /rename "%{date} - %{time} - %{fn}.jpg"
 FixCameraDate *.mp4 /rename "%{fn} - %{month}-%{day}-%{year} %{hour}-%{minute}-%{second}"
 FixCameraDate *.* /rename
@@ -38,6 +38,7 @@ FixCameraDate *.* /rename
 * If you just wrote `/rename` but without specifying a pattern, then it uses `"%{datetime} - %{fn}"`
 * If the pattern doesn't include an extension (e.g. `.jpg` or `.mp4`) then when it renames the file it will just keep the same extension as it already had before.
 * `%{fn}` is the original name of the file, minus its extension, with a special feature noted below.
+* `%{place}` is the name of the place where the file was taken, based on GPS tags (if any) embedded in the file
 * `%{datetime}` is the same as `%{date} - %{time}`
 * `%{date}` is the same as `%{year}.%{month}.%{day}`
 * `%{time}` is the same as `%{hour}.%{minute}.%{second}`
