@@ -171,7 +171,6 @@ Module Module1
                 ' Filename heuristics:
                 ' (1) If the user omitted an extension from the rename string, then we re-use the one that was given to us
                 ' (2) If the filename already matched our datetime format, then we figure out what was the base filename
-                If Not cmdPattern.Contains("%{datetime}") AndAlso Not cmdPattern.Contains("%{date}") Then Console.WriteLine("Please include either %{datetime} or %{date} in the pattern") : Return
                 If Not cmdPattern.Contains("%{fn}") Then Console.WriteLine("Please include %{fn} in the pattern") : Return
                 If cmdPattern.Contains("\") Then Console.WriteLine("Folders not allowed in pattern") : Return
                 If cmdPattern.Split({"%{fn}"}, StringSplitOptions.None).Length <> 2 Then Console.WriteLine("Please include %{fn} only once in the pattern") : Return
