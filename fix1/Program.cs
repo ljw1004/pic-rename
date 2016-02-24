@@ -6,12 +6,13 @@ using System.Threading.Tasks;
 using System.Net.Http;
 using System.Threading;
 using System.IO;
+using System.Xml.Linq;
 
-class Program
+static partial class Program
 {
     static void Main(string[] args)
     {
-        //If BingMapsKey.BingMapsKey = "" Then Console.WriteLine("THIS VERSION HAS BEEN BUILT WITHOUT GPS SUPPORT")
+        if (BingMapsKey == "") Console.WriteLine("THIS VERSION HAS BEEN BUILT WITHOUT GPS SUPPORT");
         string cmdFn = "", cmdPattern = "", cmdError = ""; TimeSpan? cmdOffset = null;
         var cmdArgs = new LinkedList<string>(args);
         // Get the filename
@@ -83,6 +84,75 @@ class Program
 
     }
 
+    static HttpClient http = new HttpClient();
+
+    static void DoGps(Dictionary<int, FileToDo> gpsToDo0, Queue<FileToDo> filesToDo)
+    {
+        var gpsToDo = new Dictionary<int, FileToDo>(gpsToDo0);
+        gpsToDo0.Clear();
+        Console.Write($"Looking up {gpsToDo.Count} GPS places");
+
+        // Send the request
+        var queryData = "Bing Spatial Data Services, 2.0\r\n";
+        queryData += "Id|GeocodeRequest/Culture|ReverseGeocodeRequest/IncludeEntityTypes|ReverseGeocodeRequest/Location/Latitude|ReverseGeocodeRequest/Location/Longitude|GeocodeResponse/Address/Neighborhood|GeocodeResponse/Address/Locality|GeocodeResponse/Address/AdminDistrict|GeocodeResponse/Address/CountryRegion\r\n";
+        foreach (var kv in gpsToDo)
+        {
+            queryData += $"{kv.Key}|en-US|neighborhood|{kv.Value.gpsCoordinates.Latitude:0.000000}|{kv.Value.gpsCoordinates.Longitude:0.000000}\r\n";
+        }
+        var queryUri = $"http://spatial.virtualearth.net/REST/v1/dataflows/geocode?input=pipe&key={BingMapsKey}";
+        Console.Write(".");
+        var statusResp = http.PostAsync(queryUri, new StringContent(queryData)).GetAwaiter().GetResult();
+        if (!statusResp.IsSuccessStatusCode) { Console.WriteLine($"ERROR {statusResp.StatusCode} - {statusResp.ReasonPhrase}"); return; }
+        if (string.IsNullOrEmpty(statusResp.Headers.Location?.ToString()) { Console.WriteLine(" ERROR - no location"); return; }
+        var statusUri = statusResp.Headers.Location.ToString();
+        Console.Write(".");
+
+        // Ping the location until we get somewhere
+        var resultUri = "";
+        while (true)
+        {
+            Thread.Sleep(2000);
+            Console.Write(".");
+            var statusRaw = http.GetStringAsync($"{statusUri}?key={BingMapsKey}&output=xml").GetAwaiter().GetResult();
+            Console.Write(".");
+            var statusXml = XDocument.Parse(statusRaw);
+            var status = statusXml.Descendants(XName.Get("Status", "http://schemas.microsoft.com/search/local/ws/rest/v1")).FirstOrDefault()?.Value;
+            if (status == null) { Console.WriteLine("ERROR didn't find status"); return; }
+            if (status == "Pending") continue;
+            if (status == "Failed") { Console.WriteLine("ERROR 'Failed'"); return; }
+            resultUri = (from link in statusXml.Descendants(XName.Get("Link", "http://schemas.microsoft.com/search/local/ws/rest/v1"))
+                         where link.Attribute("role")?.Value == "output" && link.Attribute("name")?.Value == "succeeded"
+                         select link.Value).FirstOrDefault();
+            break;
+        }
+        if (string.IsNullOrEmpty(resultUri)) { Console.WriteLine("ERROR no results"); return; }
+
+        var resultRaw = http.GetStringAsync($"{resultUri}?key={BingMapsKey}&output=json").GetAwaiter().GetResult();
+        Console.Write(".");
+        var resultLines = resultRaw.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Skip(2).ToArray();
+        foreach (var result in resultLines)
+        {
+            var parts = result.Split(new[] { '|' });
+            var parts2 = new List<string>();
+            var id = int.Parse(parts[0]);
+            var neighborhood = parts[5]; // Capitol Hill
+            var locality = parts[6]; // Seattle
+            var adminDistrict = parts[7]; // WA
+            var country = parts[8]; // United States
+            if (!string.IsNullOrEmpty(neighborhood)) parts2.Add(neighborhood);
+            if (!string.IsNullOrEmpty(locality)) parts2.Add(locality);
+            if (!string.IsNullOrEmpty(adminDistrict)) parts2.Add(adminDistrict);
+            if (!string.IsNullOrEmpty(country)) parts2.Add(country);
+            var place = String.Join(", ", parts2);
+            if (!string.IsNullOrEmpty(place))
+            {
+                gpsToDo[id].hasGpsResult = place;
+                filesToDo.Enqueue(gpsToDo[id]);
+            }
+        }
+        Console.WriteLine("done");
+    }
+
 
     delegate string PartGenerator(string fn, DateTime dt, string place);
     delegate int MatchFunction(string remainder); // -1 for no-match, otherwise is the number of characters gobbled up
@@ -120,7 +190,494 @@ class Program
         public string hasGpsResult;
     }
 
+
+    static Tuple<DateTimeKind, UpdateTimeFunc> FilestampTime(string fn)
+    {
+        var creationTime = File.GetCreationTime(fn);
+        var writeTime = File.GetLastWriteTime(fn);
+        var winnerTime = creationTime;
+        if (writeTime < winnerTime) winnerTime = writeTime;
+        var localTime = DateTimeKind.Utc(winnerTime.ToUniversalTime()); // Although they're stored in UTC on disk, the APIs give us local - time
+        //
+        // BUG COMPATIBILITY: Filestamp times are never as good as metadata times.
+        // Windows Phone doesn't store metadata, but it does use filenames of the form "WP_20131225".
+        // If we find that, we'll use it.
+        int year = 0, month = 0, day = 0;
+        bool hasWpName = false, usedFilenameTime = false;
+        var regex = new System.Text.RegularExpressions.Regex(@"WP_20\d\d\d\d\d\d");
+        if (regex.IsMatch(fn))
+        {
+            var i = fn.IndexOf("WP_20") + 3;
+            if (fn.Length >= i + 8)
+            {
+                hasWpName = true;
+                var s = fn.Substring(i, 8);
+                year = int.Parse(s.Substring(0, 4));
+                month = int.Parse(s.Substring(4, 2));
+                day = int.Parse(s.Substring(6, 2));
+
+                if (winnerTime.Year == year && winnerTime.Month == month && winnerTime.Day == day)
+                {
+                    // good, the filestamp agrees with the filename
+                }
+                else
+                {
+                    localTime = DateTimeKind.Unspecified(new DateTime(year, month, day, 12, 0, 0, System.DateTimeKind.Unspecified));
+                    usedFilenameTime = true;
+                }
+            }
+        }
+
+        //
+        UpdateTimeFunc lambda = (file2, off) =>
+        {
+            if (hasWpName)
+            {
+                var nt = winnerTime + off;
+                if (usedFilenameTime || nt.Year != year || nt.Month != month || nt.Day != day)
+                {
+                    Console.WriteLine("Unable to modify time of file, since time was derived from filename"); return false;
+                }
+            }
+            File.SetCreationTime(fn, creationTime + off);
+            File.SetLastWriteTime(fn, writeTime + off);
+            return true;
+        };
+
+        return Tuple.Create(localTime, lambda);
+    }
+
+
+    static Tuple<DateTimeKind?, UpdateTimeFunc, GpsCoordinates> ExifTime(Stream file, long start, long fend)
+    {
+        DateTime? timeLastModified=null, timeOriginal=null, timeDigitized=null;
+        long posLastModified = 0, posOriginal = 0, posDigitized = 0;
+        string gpsNS = "", gpsEW = "";
+        double? gpsLatVal = null, gpsLongVal = null;
+
+        var pos = start + 2;
+        while (true) // Iterate through the EXIF markers
+        {
+            if (pos + 4 > fend) break;
+            file.Seek(pos, SeekOrigin.Begin);
+            var marker = file.Read2byte();
+            var msize = file.Read2byte();
+            //Console.WriteLine("EXIF MARKER {0:X}", marker)
+            if (pos + msize > fend) break;
+            var mbuf_pos = pos;
+            pos += 2 + msize;
+            if (marker == 0xFFDA) break; // image data follows this marker; we can stop our iteration
+            if (marker != 0xFFE1) continue; // we're only interested in exif markers
+            if (msize < 14) continue;
+            var exif1 = file.Read4byte(); if (exif1 != 0x45786966) continue; // exif marker should start with this header "Exif"
+            var exif2 = file.Read2byte(); if (exif2 != 0) continue;  // and with this header
+            var exif3 = file.Read4byte();
+            var ExifDataIsLittleEndian = false;
+            if (exif3 == 0x49492A00) ExifDataIsLittleEndian = true;
+            else if (exif3 == 0x4D4D002A) ExifDataIsLittleEndian = false;
+            else continue; // unrecognized byte-order
+            var ipos = file.Read4byte(ExifDataIsLittleEndian);
+            if (ipos + 12 >= msize) continue;  // error  in tiff header
+            //
+            // Format of EXIF is a chain of IFDs. Each consists of a number of tagged entries.
+            // One of the tagged entries may be "SubIFDpos = &H..." which gives the address of the
+            // next IFD in the chain; if this entry is absent or 0, then we're on the last IFD.
+            // Another tagged entry may be "GPSInfo = &H..." which gives the address of the GPS IFD
+            //
+            uint subifdpos = 0;
+            uint gpsifdpos = 0;
+            while (true) // iterate through the IFDs
+            {
+                //Console.WriteLine("  IFD @{0:X}\n", ipos)
+                var ibuf_pos = mbuf_pos + 10 + ipos;
+                file.Seek(ibuf_pos, SeekOrigin.Begin);
+                var nentries = file.Read2byte(ExifDataIsLittleEndian);
+                if (10 + ipos + 2 + nentries * 12 + 4 >= msize) break;  // error in ifd header
+                file.Seek(ibuf_pos + 2 + nentries * 12, SeekOrigin.Begin);
+                ipos = file.Read4byte(ExifDataIsLittleEndian);
+                for (var i = 0; i < nentries; i++)
+                {
+                    var ebuf_pos = ibuf_pos + 2 + i * 12;
+                    file.Seek(ebuf_pos, SeekOrigin.Begin);
+                    var tag = file.Read2byte(ExifDataIsLittleEndian);
+                    var format = file.Read2byte(ExifDataIsLittleEndian);
+                    var ncomps = file.Read4byte(ExifDataIsLittleEndian);
+                    var data = file.Read4byte(ExifDataIsLittleEndian);
+                    //Console.WriteLine("    TAG {0:X} format={1:X} ncomps={2:X} data={3:X}", tag, format, ncomps, data)
+                    if (tag == 0x8769 && format == 4)
+                    {
+                        subifdpos = data;
+                    }
+                    else if (tag == 0x8825 && format == 4)
+                    {
+                        gpsifdpos = data;
+                    }
+                    else if ((tag == 1 || tag == 3) && format == 2 && ncomps == 2)
+                    {
+                        var s = ((char)((int)(data >> 24))).ToString();
+                        if (tag == 1) gpsNS = s; else gpsEW = s;
+                    }
+                    else if ((tag == 2 || tag == 4) && format == 5 && ncomps == 3 && 10 + data + ncomps < msize)
+                    {
+                        var ddpos = mbuf_pos + 10 + data;
+
+                        file.Seek(ddpos, SeekOrigin.Begin);
+                        var degTop = (double)file.Read4byte(ExifDataIsLittleEndian);
+                        var degBot = (double)file.Read4byte(ExifDataIsLittleEndian);
+                        var minTop = (double)file.Read4byte(ExifDataIsLittleEndian);
+                        var minBot = (double)file.Read4byte(ExifDataIsLittleEndian);
+                        var secTop = (double)file.Read4byte(ExifDataIsLittleEndian);
+                        var secBot = (double)file.Read4byte(ExifDataIsLittleEndian);
+                        var deg = degTop / degBot + minTop / minBot / 60.0 + secTop / secBot / 3600.0;
+                        if (tag == 2) gpsLatVal = deg;
+                        else if (tag == 4) gpsLongVal = deg;
+                    }
+                    else if ((tag == 0x132 || tag == 0x9003 || tag == 0x9004) && format == 2 && ncomps == 20 && 10 + data + ncomps < msize)
+                    {
+                        var ddpos = mbuf_pos + 10 + data;
+                        file.Seek(ddpos, SeekOrigin.Begin);
+                        var buf = new byte[19]; file.Read(buf, 0, 19);
+                        var s = System.Text.Encoding.ASCII.GetString(buf);
+                        DateTime dd;
+                        if (DateTime.TryParseExact(s, "yyyy:MM:dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out dd))
+                        {
+                            if (tag == 0x132) { timeLastModified = dd; posLastModified = ddpos; }
+                            if (tag == 0x9003) { timeOriginal = dd; posOriginal = ddpos; }
+                            if (tag == 0x9004) { timeDigitized = dd; posDigitized = ddpos; }
+                            //Console.WriteLine("      {0}", dd)
+                        }
+                    }
+                } // next
+                if (ipos == 0)
+                {
+                    ipos = subifdpos; subifdpos = 0;
+                    if (ipos == 0) { ipos = gpsifdpos; gpsifdpos = 0; }
+                    if (ipos == 0) break; // indicates the last IFD in this marker
+                }
+            } // while
+        }
+
+        var winnerTime = timeLastModified;
+        if (!winnerTime.HasValue || (timeDigitized.HasValue && timeDigitized.Value < winnerTime.Value)) winnerTime = timeDigitized;
+        if (!winnerTime.HasValue || (timeOriginal.HasValue && timeOriginal.Value < winnerTime.Value)) winnerTime = timeOriginal;
+        //
+        var winnerTimeOffset = winnerTime.HasValue ? DateTimeKind.Unspecified(winnerTime.Value) : (DateTimeKind?)null;
+
+        UpdateTimeFunc lambda = (file2, off) =>
+        {
+            if (timeLastModified.HasValue && posLastModified != 0)
+            {
+                var buf = Encoding.ASCII.GetBytes((timeLastModified.Value + off).ToString("yyyy:MM:dd HH:mm:ss"));
+                file2.Seek(posLastModified, SeekOrigin.Begin);
+                file2.Write(buf, 0, buf.Length);
+            }
+            if (timeOriginal.HasValue && posOriginal != 0)
+            {
+                var buf = Encoding.ASCII.GetBytes((timeOriginal.Value + off).ToString("yyyy:MM:dd HH:mm:ss"));
+                file2.Seek(posOriginal, SeekOrigin.Begin);
+                file2.Write(buf, 0, buf.Length);
+            }
+            if (timeDigitized.HasValue && posDigitized != 0)
+            {
+                var buf = Encoding.ASCII.GetBytes((timeDigitized.Value + off).ToString("yyyy:MM:dd HH:mm:ss"));
+                file2.Seek(posDigitized, SeekOrigin.Begin);
+                file2.Write(buf, 0, buf.Length);
+            }
+            return true;
+        };
+
+        GpsCoordinates gps = null;
+        if ((gpsNS == "N" || gpsNS == "S") && gpsLatVal.HasValue && (gpsEW == "E" || gpsEW == "W") && gpsLongVal.HasValue)
+        {
+            gps = new GpsCoordinates();
+            gps.Latitude = gpsNS == "N" ? gpsLatVal.Value : -gpsLatVal.Value;
+            gps.Longitude = gpsEW == "E" ? gpsLongVal.Value : -gpsLongVal.Value;
+        }
+
+        return Tuple.Create(winnerTimeOffset, lambda, gps);
+    }
+
+
+    Function Mp4Time(file As IO.Stream, start As Long, fend As Long) As Tuple(Of DateTimeKind?, UpdateTimeFunc, GpsCoordinates)
+        ' The file is made up of a sequence of boxes, with a standard way to find size and FourCC "kind" of each.
+        ' Some box kinds contain a kind-specific blob of binary data. Other box kinds contain a sequence
+        ' of sub-boxes. You need to look up the specs for each kind to know whether it has a blob or sub-boxes.
+        ' We look for a top-level box of kind "moov", which contains sub-boxes, and then we look for its sub-box
+        ' of kind "mvhd", which contains a binary blob. This is where Creation/ModificationTime are stored.
+        Dim pos = start, payloadStart = 0L, payloadEnd = 0L, boxKind = ""
+        '
+        While Mp4ReadNextBoxInfo(file, pos, fend, boxKind, payloadStart, payloadEnd) AndAlso boxKind<> "ftyp" : pos = payloadEnd
+        End While
+        If boxKind <> "ftyp" Then Return EmptyResult
+        Dim majorBrandBuf(3) As Byte
+        file.Seek(payloadStart, SeekOrigin.Begin) : file.Read(majorBrandBuf, 0, 4)
+        Dim majorBrand = Text.Encoding.ASCII.GetString(majorBrandBuf)
+        '
+        pos = start
+        While Mp4ReadNextBoxInfo(file, pos, fend, boxKind, payloadStart, payloadEnd) AndAlso boxKind<> "moov" : pos = payloadEnd : End While
+        If boxKind <> "moov" Then Return EmptyResult
+        Dim moovStart = payloadStart, moovEnd = payloadEnd
+        '
+        pos = moovStart : fend = moovEnd
+        While Mp4ReadNextBoxInfo(file, pos, fend, boxKind, payloadStart, payloadEnd) AndAlso boxKind<> "mvhd" : pos = payloadEnd : End While
+        If boxKind <> "mvhd" Then Return EmptyResult
+        Dim mvhdStart = payloadStart, mvhdEnd = payloadEnd
+        '
+        pos = moovStart : fend = moovEnd
+        Dim cdayStart = 0L, cdayEnd = 0L
+        Dim cnthStart = 0L, cnthEnd = 0L
+        While Mp4ReadNextBoxInfo(file, pos, fend, boxKind, payloadStart, payloadEnd) AndAlso boxKind<> "udta" : pos = payloadEnd : End While
+        If boxKind = "udta" Then
+            Dim udtaStart = payloadStart, udtaEnd = payloadEnd
+            '
+            pos = udtaStart : fend = udtaEnd
+            While Mp4ReadNextBoxInfo(file, pos, fend, boxKind, payloadStart, payloadEnd) AndAlso boxKind<> "©day" : pos = payloadEnd : End While
+            If boxKind = "©day" Then cdayStart = payloadStart : cdayEnd = payloadEnd
+            '
+            pos = udtaStart : fend = udtaEnd
+            While Mp4ReadNextBoxInfo(file, pos, fend, boxKind, payloadStart, payloadEnd) AndAlso boxKind<> "CNTH" : pos = payloadEnd : End While
+            If boxKind = "CNTH" Then cnthStart = payloadStart : cnthEnd = payloadEnd
+        End If
+
+        ' The "mvhd" binary blob consists of 1byte (version, either 0 or 1), 3bytes (flags),
+        ' and then either 4bytes (creation), 4bytes (modification)
+        ' or 8bytes (creation), 8bytes (modification)
+        ' If version=0 then it's the former, otherwise it's the later.
+        ' In both cases "creation" and "modification" are big-endian number of seconds since 1st Jan 1904 UTC
+        If mvhdEnd - mvhdStart< 20 Then Return EmptyResult
+        file.Seek(mvhdStart + 0, SeekOrigin.Begin) : Dim version = file.ReadByte(), numBytes = If(version = 0, 4, 8)
+        file.Seek(mvhdStart + 4, SeekOrigin.Begin)
+        Dim creationFix1970 = False, modificationFix1970 = False
+        Dim creationTime = file.ReadDate(numBytes, creationFix1970)
+        Dim modificationTime = file.ReadDate(numBytes, modificationFix1970)
+        ' COMPATIBILITY-BUG: The spec says that these times are in UTC.
+        ' However, my Sony Cybershot merely gives them in unspecified time (i.e. local time but without specifying the timezone)
+        ' Indeed its UI doesn't even let you say what the current UTC time is.
+        ' I also noticed that my Sony Cybershot gives MajorBrand="MSNV", which isn't used by my iPhone or Canon or WP8.
+        ' I'm going to guess that all "MSNV" files come from Sony, and all of them have the bug.
+        Dim makeMvhdTime = Function(dt As DateTime) As DateTimeKind
+                               If majorBrand = "MSNV" Then Return DateTimeKind.Unspecified(dt)
+                               Return DateTimeKind.Utc(dt)
+                           End Function
+
+        ' The "©day" binary blob consists of 2byte (string-length, big-endian), 2bytes (language-code), string
+        Dim dayTime As DateTimeKind? = Nothing
+        Dim cdayStringLen = 0, cdayString = ""
+        If cdayStart<> 0 AndAlso cdayEnd - cdayStart > 4 Then
+            file.Seek(cdayStart + 0, SeekOrigin.Begin)
+            cdayStringLen = file.Read2byte()
+            If cdayStart + 4 + cdayStringLen <= cdayEnd Then
+                file.Seek(cdayStart + 4, SeekOrigin.Begin)
+                Dim buf = New Byte(cdayStringLen - 1) { }
+    file.Read(buf, 0, cdayStringLen)
+                cdayString = System.Text.Encoding.ASCII.GetString(buf)
+                Dim d As DateTimeOffset : If DateTimeOffset.TryParse(cdayString, d) Then dayTime = DateTimeKind.Local(d)
+            End If
+        End If
+
+        ' The "CNTH" binary blob consists of 8bytes of unknown, followed by EXIF data
+        Dim cnthTime As DateTimeKind? = Nothing, cnthLambda As UpdateTimeFunc = Nothing
+        If cnthStart<> 0 AndAlso cnthEnd - cnthStart > 16 Then
+           Dim exif_ft = ExifTime(file, cnthStart + 8, cnthEnd)
+            cnthTime = exif_ft.Item1 : cnthLambda = exif_ft.Item2
+        End If
+
+        Dim winnerTime As DateTimeKind? = Nothing
+        If dayTime.HasValue Then
+            Debug.Assert(dayTime.Value.dt.Kind = System.DateTimeKind.Local)
+            winnerTime = dayTime
+            ' prefer this best of all because it knows local time and timezone
+        ElseIf cnthTime.HasValue Then
+            Debug.Assert(cnthTime.Value.dt.Kind = System.DateTimeKind.Unspecified)
+            winnerTime = cnthTime
+            ' this is second-best because it knows local time, just not timezone
+        Else
+            ' Otherwise, we'll make do with a UTC time, where we don't know local-time when the pic was taken, nor timezone
+            If creationTime.HasValue AndAlso modificationTime.HasValue Then
+                winnerTime = makeMvhdTime(If(creationTime < modificationTime, creationTime.Value, modificationTime.Value))
+            ElseIf creationTime.HasValue Then
+                winnerTime = makeMvhdTime(creationTime.Value)
+            ElseIf modificationTime.HasValue Then
+                winnerTime = makeMvhdTime(modificationTime.Value)
+            End If
+        End If
+
+        Dim lambda As UpdateTimeFunc =
+            Function(file2, offset)
+                If creationTime.HasValue Then
+                    Dim dd = creationTime.Value + offset
+                    file2.Seek(mvhdStart + 4, SeekOrigin.Begin)
+                    file2.WriteDate(numBytes, dd, creationFix1970)
+                End If
+                If modificationTime.HasValue Then
+                    Dim dd = modificationTime.Value + offset
+                    file2.Seek(mvhdStart + 4 + numBytes, SeekOrigin.Begin)
+                    file2.WriteDate(numBytes, dd, modificationFix1970)
+                End If
+                If Not String.IsNullOrWhiteSpace(cdayString) Then
+                    Dim dd As DateTimeOffset
+                    If DateTimeOffset.TryParse(cdayString, dd) Then
+                        dd = dd + offset
+                        Dim str2 = dd.ToString("yyyy-MM-ddTHH:mm:sszz00")
+                        Dim buf2 = Text.Encoding.ASCII.GetBytes(str2)
+                        If buf2.Length = cdayStringLen Then
+                            file2.Seek(cdayStart + 4, SeekOrigin.Begin)
+                            file2.Write(buf2, 0, buf2.Length)
+                        End If
+                    End If
+                End If
+                If cnthLambda IsNot Nothing Then cnthLambda(file2, offset)
+                Return True
+            End Function
+
+        Return Tuple.Create(winnerTime, lambda, CType(Nothing, GpsCoordinates))
+    End Function
+
+
+    static bool Mp4ReadNextBoxInfo(Stream f, long pos, long fend, ref string boxKind, ref long payloadStart, ref long payloadEnd)
+    {
+        boxKind = "" : payloadStart = 0 : payloadEnd = 0
+        If pos +8 > fend Then Return False
+       Dim b(3) As Byte
+        f.Seek(pos, SeekOrigin.Begin)
+        f.Read(b, 0, 4) : If BitConverter.IsLittleEndian Then Array.Reverse(b)
+        Dim size = BitConverter.ToUInt32(b, 0)
+        f.Read(b, 0, 4)
+        Dim kind = ChrW(b(0)) & ChrW(b(1)) & ChrW(b(2)) & ChrW(b(3))
+        If size<> 1 Then
+            If pos + size > fend Then Return False
+            boxKind = kind : payloadStart = pos + 8 : payloadEnd = payloadStart + size - 8 : Return True
+        End If
+        If size = 1 AndAlso pos +16 <= fend Then
+           ReDim b(7)
+            f.Read(b, 0, 8) : If BitConverter.IsLittleEndian Then Array.Reverse(b)
+            Dim size2 = CLng(BitConverter.ToUInt64(b, 0))
+            If pos +size2 > fend Then Return False
+           boxKind = kind : payloadStart = pos + 16 : payloadEnd = payloadStart + size2 - 16 : Return True
+        End If
+        Return False
+    }
+
+
+
+    static void Add<T, U, V>(this LinkedList<Tuple<T, U, V>> me, T arg1, U arg2, V arg3)
+    {
+        me.AddLast(Tuple.Create(arg1, arg2, arg3));
+    }
+
+    readonly static DateTime TZERO_1904_UTC = new DateTime(1904, 1, 1, 0, 0, 0, System.DateTimeKind.Utc);
+    readonly static DateTime TZERO_1970_UTC = new DateTime(1970, 1, 1, 0, 0, 0, System.DateTimeKind.Utc);
+
+    static ushort Read2byte(this Stream f, bool fileIsLittleEndian = false)
+    {
+        var b = new byte[2];
+        f.Read(b, 0, 2);
+        if (BitConverter.IsLittleEndian != fileIsLittleEndian) Array.Reverse(b);
+        return BitConverter.ToUInt16(b, 0);
+    }
+
+    static uint Read4byte(this Stream f, bool fileIsLittleEndian = false)
+    {
+        var b = new byte[4];
+        f.Read(b, 0, 4);
+        if (BitConverter.IsLittleEndian != fileIsLittleEndian) Array.Reverse(b);
+        return BitConverter.ToUInt32(b, 0);
+    }
+
+    static DateTime? ReadDate(this Stream f, int numBytes, ref bool fixed1970)
+    {
+        // COMPATIBILITY-BUG: The spec says that these are expressed in seconds since 1904.
+        // But my brother's Android phone picks them in seconds since 1970.
+        // I'm going to guess that all dates before 1970 should be 66 years in the future
+        // Note: I'm applying this correction *before* converting to date. That's because,
+        // what with leap-years and stuff, it doesn't feel safe the other way around.
+        if (numBytes == 4)
+        {
+            var b = new byte[4];
+            f.Read(b, 0, 4);
+            var secs = BitConverter.ToUInt32(b, 0);
+            if (secs == 0) return null;
+            fixed1970 = (secs < (TZERO_1970_UTC - TZERO_1904_UTC).TotalSeconds);
+            return fixed1970 ? TZERO_1970_UTC.AddSeconds(secs) : TZERO_1904_UTC.AddSeconds(secs);
+        }
+        else if (numBytes == 8)
+        {
+            var b = new byte[8];
+            f.Read(b, 0, 8);
+            var secs = BitConverter.ToUInt64(b, 0);
+            if (secs == 0) return null;
+            fixed1970 = (secs < (TZERO_1970_UTC - TZERO_1904_UTC).TotalSeconds);
+            return fixed1970 ? TZERO_1970_UTC.AddSeconds(secs) : TZERO_1904_UTC.AddSeconds(secs);
+        }
+        else
+        {
+            throw new ArgumentException("numBytes");
+        }
+    }
+
+    static void WriteDate(this Stream f, int numBytes, DateTime d, bool fix1970)
+    {
+        if (d.Kind != System.DateTimeKind.Utc) throw new ArgumentException("Can only write UTC dates");
+        if (numBytes == 4)
+        {
+            var secs = (uint)(fix1970 ? d - TZERO_1970_UTC : d - TZERO_1904_UTC).TotalSeconds);
+            var b = BitConverter.GetBytes(secs);
+            if (BitConverter.IsLittleEndian) Array.Reverse(b);
+            f.Write(b, 0, 4);
+        }
+        else if (numBytes == 8)
+        {
+            var secs = (ulong)(fix1970 ? d - TZERO_1970_UTC : d - TZERO_1904_UTC).TotalSeconds);
+            var b = BitConverter.GetBytes(secs);
+            if (BitConverter.IsLittleEndian) Array.Reverse(b);
+            f.Write(b, 0, 8);
+        }
+        else
+        {
+            throw new ArgumentException("numBytes");
+        }
+    }
+
+
 }
+
+
+struct DateTimeKind
+{
+    public DateTime dt;
+    public TimeSpan offset;
+    // Three modes:
+    // (1) Time known to be in UTC: DateTime.Kind=UTC, offset=0
+    // (2) Time known to be in some specific timezone: DateTime.Kind=Local, offset gives that timezone
+    // (3) Time where nothing about timezone is known: DateTime.Kind=Unspecified, offset=0
+
+    public static DateTimeKind Utc(DateTime d)
+    {
+        var d2 = new DateTime(d.Ticks, System.DateTimeKind.Utc);
+        return new DateTimeKind { dt = d2, offset = default(TimeSpan) };
+    }
+    public static DateTimeKind Unspecified(DateTime d)
+    {
+        var d2 = new DateTime(d.Ticks, System.DateTimeKind.Unspecified);
+        return new DateTimeKind { dt = d2, offset = default(TimeSpan) };
+    }
+    public static DateTimeKind Local(DateTimeOffset d)
+    {
+        var d2 = new DateTime(d.Ticks, System.DateTimeKind.Local);
+        return new DateTimeKind { dt = d2, offset = d.Offset };
+    }
+
+    public override string ToString()
+    {
+        if (dt.Kind == System.DateTimeKind.Utc) return dt.ToString("yyyy:MM:ddTHH:mm:ssZ");
+        else if (dt.Kind == System.DateTimeKind.Unspecified) return dt.ToString("yyyy:MM:dd HH:mm:ss");
+        else if (dt.Kind == System.DateTimeKind.Local) return dt.ToString("yyyy:MM:dd HH:mm:ss") + offset.Hours.ToString("+00;-00") + "00";
+        else throw new Exception("Invalid DateTimeKind");
+    }
+
+
+}
+
 
 /*
 
@@ -355,127 +912,15 @@ patternExt = pattern.Substring(pattern.Length - potentialExt.Length)
 
 
 
-    Sub DoGps(gpsToDo0 As Dictionary(Of Integer, FileToDo), filesToDo As Queue(Of FileToDo))
-        Static Dim http As New HttpClient
-        Dim gpsToDo As New Dictionary(Of Integer, FileToDo)(gpsToDo0)
-        gpsToDo0.Clear()
-        Console.Write($"Looking up {gpsToDo.Count} GPS places")
-
-        ' Send the request
-        Dim queryData = "Bing Spatial Data Services, 2.0" & vbCrLf
-        queryData &= "Id|GeocodeRequest/Culture|ReverseGeocodeRequest/IncludeEntityTypes|ReverseGeocodeRequest/Location/Latitude|ReverseGeocodeRequest/Location/Longitude|GeocodeResponse/Address/Neighborhood|GeocodeResponse/Address/Locality|GeocodeResponse/Address/AdminDistrict|GeocodeResponse/Address/CountryRegion" & vbCrLf
-        For Each kv In gpsToDo
-            queryData &= $"{kv.Key}|en-US|neighborhood|{kv.Value.gpsCoordinates.Latitude:0.000000}|{kv.Value.gpsCoordinates.Longitude:0.000000}{vbCrLf}"
-        Next
-        Dim key = BingMapsKey.BingMapsKey
-        Dim queryUri = $"http://spatial.virtualearth.net/REST/v1/dataflows/geocode?input=pipe&key={key}"
-        Console.Write(".")
-        Dim statusResp = http.PostAsync(queryUri, New StringContent(queryData)).GetAwaiter().GetResult()
-        If Not statusResp.IsSuccessStatusCode Then Console.WriteLine($"ERROR {statusResp.StatusCode} - {statusResp.ReasonPhrase}") : Return
-        If String.IsNullOrEmpty(statusResp.Headers.Location?.ToString()) Then Console.WriteLine(" ERROR - no location") : Return
-        Dim statusUri = statusResp.Headers.Location.ToString()
-        Console.Write(".")
-
-        ' Ping the location until we get somewhere
-        Dim resultUri = ""
-        While True
-            Thread.Sleep(2000)
-            Console.Write(".")
-            Dim statusRaw = http.GetStringAsync($"{statusUri}?key={key}&output=xml").GetAwaiter().GetResult()
-            Console.Write(".")
-            Dim statusXml = XDocument.Parse(statusRaw)
-            Dim status = statusXml...< Status >.Value
-            If status Is Nothing Then Console.WriteLine("ERROR didn't find status") : Return
-            If status = "Pending" Then Continue While
-            If status = "Failed" Then Console.WriteLine("ERROR 'Failed'") : Return
-            resultUri = (From link In statusXml...<Link>
-                         Where link.@role = "output" AndAlso link.@name = "succeeded"
-                         Select link.Value).FirstOrDefault
-            Exit While
-        End While
-        If String.IsNullOrEmpty(resultUri) Then Console.WriteLine("ERROR no results") : Return
-
-        Dim resultRaw = http.GetStringAsync($"{resultUri}?key={key}&output=json").GetAwaiter().GetResult()
-        Console.Write(".")
-        Dim resultLines = resultRaw.Split({vbCr(0), vbLf(0)}, StringSplitOptions.RemoveEmptyEntries).Skip(2).ToArray()
-        For Each result In resultLines
-            Dim parts = result.Split({"|"c})
-            Dim parts2 As New List(Of String)
-            Dim id = Integer.Parse(parts(0))
-            Dim neighborhood = parts(5) ' Capitol Hill
-            Dim locality = parts(6) ' Seattle
-            Dim adminDistrict = parts(7) ' WA
-            Dim country = parts(8) ' United States
-            If Not String.IsNullOrEmpty(neighborhood) Then parts2.Add(neighborhood)
-            If Not String.IsNullOrEmpty(locality) Then parts2.Add(locality)
-            If Not String.IsNullOrEmpty(adminDistrict) Then parts2.Add(adminDistrict)
-            If Not String.IsNullOrEmpty(country) Then parts2.Add(country)
-            Dim place = String.Join(", ", parts2)
-            If Not String.IsNullOrEmpty(place) Then
-                gpsToDo(id).hasGpsResult = place
-                filesToDo.Enqueue(gpsToDo(id))
-            End If
-        Next
-        Console.WriteLine("done")
 
 
-    End Sub
-
-
-    Function FilestampTime(fn As String) As Tuple(Of DateTimeKind, UpdateTimeFunc)
-        Dim creationTime = IO.File.GetCreationTime(fn)
-        Dim writeTime = IO.File.GetLastWriteTime(fn)
-        Dim winnerTime = creationTime
-        If writeTime<winnerTime Then winnerTime = writeTime
-        Dim localTime = DateTimeKind.Utc(winnerTime.ToUniversalTime()) ' Although they're stored in UTC on disk, the APIs give us local-time
-        '
-        ' BUG COMPATIBILITY: Filestamp times are never as good as metadata times.
-        ' Windows Phone doesn't store metadata, but it does use filenames of the form "WP_20131225".
-        ' If we find that, we'll use it.
-        Dim year = 0, month = 0, day = 0
-        Dim hasWpName = False, usedFilenameTime = False
-        If fn Like "*WP_20######*" Then
-            Dim i = fn.IndexOf("WP_20") + 3
-            If fn.Length >= i + 8 Then
-                hasWpName = True
-                Dim s = fn.Substring(i, 8)
-                year = CInt(s.Substring(0, 4))
-                month = CInt(s.Substring(4, 2))
-                day = CInt(s.Substring(6, 2))
-
-                If winnerTime.Year = year AndAlso winnerTime.Month = month AndAlso winnerTime.Day = day Then
-                    ' good, the filestamp agrees with the filename
-                Else
-                    localTime = DateTimeKind.Unspecified(New DateTime(year, month, day, 12, 0, 0, System.DateTimeKind.Unspecified))
-                    usedFilenameTime = True
-                End If
-            End If
-        End If
-
-        '
-        Dim lambda As UpdateTimeFunc =
-            Function(file2, off)
-                If hasWpName Then
-                    Dim nt = winnerTime + off
-                    If usedFilenameTime OrElse nt.Year<> year OrElse nt.Month<> month OrElse nt.Day<> day Then
-                        Console.WriteLine("Unable to modify time of file, since time was derived from filename") : Return False
-                    End If
-                End If
-
-                IO.File.SetCreationTime(fn, creationTime + off)
-                IO.File.SetLastWriteTime(fn, writeTime + off)
-                Return True
-            End Function
-
-        Return Tuple.Create(localTime, lambda)
-    End Function
 
 
     Function MetadataTimeAndGps(fn As String) As Tuple(Of DateTimeKind?, UpdateTimeFunc, GpsCoordinates)
         Using file As New IO.FileStream(fn, IO.FileMode.Open, IO.FileAccess.Read)
-            file.Seek(0, IO.SeekOrigin.End) : Dim fend = file.Position
+            file.Seek(0, SeekOrigin.End) : Dim fend = file.Position
             If fend< 8 Then Return EmptyResult
-            file.Seek(0, IO.SeekOrigin.Begin)
+            file.Seek(0, SeekOrigin.Begin)
             Dim h1 = file.Read2byte(), h2 = file.Read2byte(), h3 = file.Read4byte()
             If h1 = &HFFD8 Then Return ExifTime(file, 0, fend) ' jpeg header
             If h3 = &H66747970 Then Return Mp4Time(file, 0, fend) ' "ftyp" prefix of mp4, mov
@@ -483,433 +928,8 @@ patternExt = pattern.Substring(pattern.Length - potentialExt.Length)
         End Using
     End Function
 
-    Function ExifTime(file As IO.Stream, start As Long, fend As Long) As Tuple(Of DateTimeKind?, UpdateTimeFunc, GpsCoordinates)
-        Dim timeLastModified, timeOriginal, timeDigitized As DateTime?
-        Dim posLastModified = 0L, posOriginal = 0L, posDigitized = 0L
-        Dim gpsNS = "", gpsEW = "", gpsLatVal As Double? = Nothing, gpsLongVal As Double? = Nothing
-
-        Dim pos = start + 2
-        While True ' Iterate through the EXIF markers
-            If pos + 4 > fend Then Exit While
-            file.Seek(pos, IO.SeekOrigin.Begin)
-            Dim marker = file.Read2byte()
-            Dim msize = file.Read2byte()
-            'Console.WriteLine("EXIF MARKER {0:X}", marker)
-            If pos + msize > fend Then Exit While
-            Dim mbuf_pos = pos
-            pos += 2 + msize
-            If marker = &HFFDA Then Exit While ' image data follows this marker; we can stop our iteration
-            If marker<> &HFFE1 Then Continue While ' we're only interested in exif markers
-            If msize < 14 Then Continue While
-            Dim exif1 = file.Read4byte() : If exif1 <> &H45786966 Then Continue While ' exif marker should start with this header "Exif"
-            Dim exif2 = file.Read2byte() : If exif2 <> 0 Then Continue While ' and with this header
-            Dim exif3 = file.Read4byte()
-            Dim ExifDataIsLittleEndian = False
-            If exif3 = &H49492A00 Then : ExifDataIsLittleEndian = True
-            ElseIf exif3 = &H4D4D002A Then : ExifDataIsLittleEndian = False
-            Else : Continue While : End If ' unrecognized byte-order
-            Dim ipos = file.Read4byte(ExifDataIsLittleEndian)
-            If ipos + 12 >= msize Then Continue While ' error  in tiff header
-            '
-            ' Format of EXIF is a chain of IFDs. Each consists of a number of tagged entries.
-            ' One of the tagged entries may be "SubIFDpos = &H..." which gives the address of the
-            ' next IFD in the chain; if this entry is absent or 0, then we're on the last IFD.
-            ' Another tagged entry may be "GPSInfo = &H..." which gives the address of the GPS IFD
-            '
-            Dim subifdpos As UInteger = 0
-            Dim gpsifdpos As UInteger = 0
-            While True ' iterate through the IFDs
-                'Console.WriteLine("  IFD @{0:X}\n", ipos)
-                Dim ibuf_pos = mbuf_pos + 10 + ipos
-                file.Seek(ibuf_pos, IO.SeekOrigin.Begin)
-                Dim nentries = file.Read2byte(ExifDataIsLittleEndian)
-                If 10 + ipos + 2 + nentries* 12 + 4 >= msize Then Exit While ' error in ifd header
-                file.Seek(ibuf_pos + 2 + nentries* 12, IO.SeekOrigin.Begin)
-                ipos = file.Read4byte(ExifDataIsLittleEndian)
-                For i = 0 To nentries - 1
-                    Dim ebuf_pos = ibuf_pos + 2 + i * 12
-                    file.Seek(ebuf_pos, IO.SeekOrigin.Begin)
-                    Dim tag = file.Read2byte(ExifDataIsLittleEndian)
-                    Dim format = file.Read2byte(ExifDataIsLittleEndian)
-                    Dim ncomps = file.Read4byte(ExifDataIsLittleEndian)
-                    Dim data = file.Read4byte(ExifDataIsLittleEndian)
-                    'Console.WriteLine("    TAG {0:X} format={1:X} ncomps={2:X} data={3:X}", tag, format, ncomps, data)
-                    If tag = &H8769 AndAlso format = 4 Then
-                        subifdpos = data
-                    ElseIf tag = &H8825 AndAlso format = 4 Then
-                        gpsifdpos = data
-                    ElseIf(tag = 1 OrElse tag = 3) AndAlso format = 2 AndAlso ncomps = 2 Then
-                       Dim s = ChrW(CInt(data >> 24))
-                        If tag = 1 Then gpsNS = s Else gpsEW = s
-                    ElseIf(tag = 2 OrElse tag = 4) AndAlso format = 5 AndAlso ncomps = 3 AndAlso 10 + data + ncomps<msize Then
-
-                       Dim ddpos = mbuf_pos + 10 + data
-
-                       file.Seek(ddpos, IO.SeekOrigin.Begin)
-                        Dim degTop = file.Read4byte(ExifDataIsLittleEndian)
-                        Dim degBot = file.Read4byte(ExifDataIsLittleEndian)
-                        Dim minTop = file.Read4byte(ExifDataIsLittleEndian)
-                        Dim minBot = file.Read4byte(ExifDataIsLittleEndian)
-                        Dim secTop = file.Read4byte(ExifDataIsLittleEndian)
-                        Dim secBot = file.Read4byte(ExifDataIsLittleEndian)
-                        Dim deg = degTop / degBot + minTop / minBot / 60.0 + secTop / secBot / 3600.0
-                        If tag = 2 Then gpsLatVal = deg
-                        If tag = 4 Then gpsLongVal = deg
-                    ElseIf(tag = &H132 OrElse tag = &H9003 OrElse tag = &H9004) AndAlso format = 2 AndAlso ncomps = 20 AndAlso 10 + data + ncomps<msize Then
-
-                       Dim ddpos = mbuf_pos + 10 + data
-
-                       file.Seek(ddpos, IO.SeekOrigin.Begin)
-                        Dim buf(18) As Byte : file.Read(buf, 0, 19)
-                        Dim s = Text.Encoding.ASCII.GetString(buf)
-                        Dim dd As DateTime
-                        If DateTime.TryParseExact(s, "yyyy:MM:dd HH:mm:ss", Globalization.CultureInfo.InvariantCulture, Globalization.DateTimeStyles.None, dd) Then
-                            If tag = &H132 Then timeLastModified = dd : posLastModified = ddpos
-                            If tag = &H9003 Then timeOriginal = dd : posOriginal = ddpos
-                            If tag = &H9004 Then timeDigitized = dd : posDigitized = ddpos
-                            'Console.WriteLine("      {0}", dd)
-                        End If
-                    End If
-                Next
-                If ipos = 0 Then
-                    ipos = subifdpos : subifdpos = 0
-                    If ipos = 0 Then ipos = gpsifdpos : gpsifdpos = 0
-                    If ipos = 0 Then Exit While ' indicates the last IFD in this marker
-                End If
-            End While
-        End While
-
-        Dim winnerTime = timeLastModified
-        If Not winnerTime.HasValue OrElse(timeDigitized.HasValue AndAlso timeDigitized.Value<winnerTime.Value) Then winnerTime = timeDigitized
-        If Not winnerTime.HasValue OrElse(timeOriginal.HasValue AndAlso timeOriginal.Value<winnerTime.Value) Then winnerTime = timeOriginal
-        '
-        Dim winnerTimeOffset = If(winnerTime.HasValue, DateTimeKind.Unspecified(winnerTime.Value), CType(Nothing, DateTimeKind ?))
-
-        Dim lambda As UpdateTimeFunc =
-            Function(file2, off)
-                If timeLastModified.HasValue AndAlso posLastModified <> 0 Then
-                    Dim buf = Text.Encoding.ASCII.GetBytes((timeLastModified.Value + off).ToString("yyyy:MM:dd HH:mm:ss"))
-                    file2.Seek(posLastModified, IO.SeekOrigin.Begin) : file2.Write(buf, 0, buf.Length)
-                End If
-                If timeOriginal.HasValue AndAlso posOriginal <> 0 Then
-                    Dim buf = Text.Encoding.ASCII.GetBytes((timeOriginal.Value + off).ToString("yyyy:MM:dd HH:mm:ss"))
-                    file2.Seek(posOriginal, IO.SeekOrigin.Begin) : file2.Write(buf, 0, buf.Length)
-                End If
-                If timeDigitized.HasValue AndAlso posDigitized <> 0 Then
-                    Dim buf = Text.Encoding.ASCII.GetBytes((timeDigitized.Value + off).ToString("yyyy:MM:dd HH:mm:ss"))
-                    file2.Seek(posDigitized, IO.SeekOrigin.Begin) : file2.Write(buf, 0, buf.Length)
-                End If
-                Return True
-            End Function
-
-        Dim gps As GpsCoordinates = Nothing
-        If(gpsNS = "N" OrElse gpsNS = "S") AndAlso gpsLatVal.HasValue AndAlso (gpsEW = "E" OrElse gpsEW = "W") AndAlso gpsLongVal.HasValue Then
-           gps = New GpsCoordinates
-           gps.Latitude = If(gpsNS = "N", gpsLatVal.Value, -gpsLatVal.Value)
-
-           gps.Longitude = If(gpsEW = "E", gpsLongVal.Value, -gpsLongVal.Value)
-
-       End If
 
 
-       Return Tuple.Create(winnerTimeOffset, lambda, gps)
-    End Function
 
-    Function Mp4Time(file As IO.Stream, start As Long, fend As Long) As Tuple(Of DateTimeKind?, UpdateTimeFunc, GpsCoordinates)
-        ' The file is made up of a sequence of boxes, with a standard way to find size and FourCC "kind" of each.
-        ' Some box kinds contain a kind-specific blob of binary data. Other box kinds contain a sequence
-        ' of sub-boxes. You need to look up the specs for each kind to know whether it has a blob or sub-boxes.
-        ' We look for a top-level box of kind "moov", which contains sub-boxes, and then we look for its sub-box
-        ' of kind "mvhd", which contains a binary blob. This is where Creation/ModificationTime are stored.
-        Dim pos = start, payloadStart = 0L, payloadEnd = 0L, boxKind = ""
-        '
-        While Mp4ReadNextBoxInfo(file, pos, fend, boxKind, payloadStart, payloadEnd) AndAlso boxKind<> "ftyp" : pos = payloadEnd
-        End While
-        If boxKind <> "ftyp" Then Return EmptyResult
-        Dim majorBrandBuf(3) As Byte
-        file.Seek(payloadStart, IO.SeekOrigin.Begin) : file.Read(majorBrandBuf, 0, 4)
-        Dim majorBrand = Text.Encoding.ASCII.GetString(majorBrandBuf)
-        '
-        pos = start
-        While Mp4ReadNextBoxInfo(file, pos, fend, boxKind, payloadStart, payloadEnd) AndAlso boxKind<> "moov" : pos = payloadEnd : End While
-        If boxKind <> "moov" Then Return EmptyResult
-        Dim moovStart = payloadStart, moovEnd = payloadEnd
-        '
-        pos = moovStart : fend = moovEnd
-        While Mp4ReadNextBoxInfo(file, pos, fend, boxKind, payloadStart, payloadEnd) AndAlso boxKind<> "mvhd" : pos = payloadEnd : End While
-        If boxKind <> "mvhd" Then Return EmptyResult
-        Dim mvhdStart = payloadStart, mvhdEnd = payloadEnd
-        '
-        pos = moovStart : fend = moovEnd
-        Dim cdayStart = 0L, cdayEnd = 0L
-        Dim cnthStart = 0L, cnthEnd = 0L
-        While Mp4ReadNextBoxInfo(file, pos, fend, boxKind, payloadStart, payloadEnd) AndAlso boxKind<> "udta" : pos = payloadEnd : End While
-        If boxKind = "udta" Then
-            Dim udtaStart = payloadStart, udtaEnd = payloadEnd
-            '
-            pos = udtaStart : fend = udtaEnd
-            While Mp4ReadNextBoxInfo(file, pos, fend, boxKind, payloadStart, payloadEnd) AndAlso boxKind<> "©day" : pos = payloadEnd : End While
-            If boxKind = "©day" Then cdayStart = payloadStart : cdayEnd = payloadEnd
-            '
-            pos = udtaStart : fend = udtaEnd
-            While Mp4ReadNextBoxInfo(file, pos, fend, boxKind, payloadStart, payloadEnd) AndAlso boxKind<> "CNTH" : pos = payloadEnd : End While
-            If boxKind = "CNTH" Then cnthStart = payloadStart : cnthEnd = payloadEnd
-        End If
-
-        ' The "mvhd" binary blob consists of 1byte (version, either 0 or 1), 3bytes (flags),
-        ' and then either 4bytes (creation), 4bytes (modification)
-        ' or 8bytes (creation), 8bytes (modification)
-        ' If version=0 then it's the former, otherwise it's the later.
-        ' In both cases "creation" and "modification" are big-endian number of seconds since 1st Jan 1904 UTC
-        If mvhdEnd - mvhdStart< 20 Then Return EmptyResult
-        file.Seek(mvhdStart + 0, IO.SeekOrigin.Begin) : Dim version = file.ReadByte(), numBytes = If(version = 0, 4, 8)
-        file.Seek(mvhdStart + 4, IO.SeekOrigin.Begin)
-        Dim creationFix1970 = False, modificationFix1970 = False
-        Dim creationTime = file.ReadDate(numBytes, creationFix1970)
-        Dim modificationTime = file.ReadDate(numBytes, modificationFix1970)
-        ' COMPATIBILITY-BUG: The spec says that these times are in UTC.
-        ' However, my Sony Cybershot merely gives them in unspecified time (i.e. local time but without specifying the timezone)
-        ' Indeed its UI doesn't even let you say what the current UTC time is.
-        ' I also noticed that my Sony Cybershot gives MajorBrand="MSNV", which isn't used by my iPhone or Canon or WP8.
-        ' I'm going to guess that all "MSNV" files come from Sony, and all of them have the bug.
-        Dim makeMvhdTime = Function(dt As DateTime) As DateTimeKind
-                               If majorBrand = "MSNV" Then Return DateTimeKind.Unspecified(dt)
-                               Return DateTimeKind.Utc(dt)
-                           End Function
-
-        ' The "©day" binary blob consists of 2byte (string-length, big-endian), 2bytes (language-code), string
-        Dim dayTime As DateTimeKind? = Nothing
-        Dim cdayStringLen = 0, cdayString = ""
-        If cdayStart<> 0 AndAlso cdayEnd - cdayStart > 4 Then
-            file.Seek(cdayStart + 0, IO.SeekOrigin.Begin)
-            cdayStringLen = file.Read2byte()
-            If cdayStart + 4 + cdayStringLen <= cdayEnd Then
-                file.Seek(cdayStart + 4, IO.SeekOrigin.Begin)
-                Dim buf = New Byte(cdayStringLen - 1) { }
-file.Read(buf, 0, cdayStringLen)
-                cdayString = System.Text.Encoding.ASCII.GetString(buf)
-                Dim d As DateTimeOffset : If DateTimeOffset.TryParse(cdayString, d) Then dayTime = DateTimeKind.Local(d)
-            End If
-        End If
-
-        ' The "CNTH" binary blob consists of 8bytes of unknown, followed by EXIF data
-        Dim cnthTime As DateTimeKind? = Nothing, cnthLambda As UpdateTimeFunc = Nothing
-        If cnthStart<> 0 AndAlso cnthEnd - cnthStart > 16 Then
-           Dim exif_ft = ExifTime(file, cnthStart + 8, cnthEnd)
-            cnthTime = exif_ft.Item1 : cnthLambda = exif_ft.Item2
-        End If
-
-        Dim winnerTime As DateTimeKind? = Nothing
-        If dayTime.HasValue Then
-            Debug.Assert(dayTime.Value.dt.Kind = System.DateTimeKind.Local)
-            winnerTime = dayTime
-            ' prefer this best of all because it knows local time and timezone
-        ElseIf cnthTime.HasValue Then
-            Debug.Assert(cnthTime.Value.dt.Kind = System.DateTimeKind.Unspecified)
-            winnerTime = cnthTime
-            ' this is second-best because it knows local time, just not timezone
-        Else
-            ' Otherwise, we'll make do with a UTC time, where we don't know local-time when the pic was taken, nor timezone
-            If creationTime.HasValue AndAlso modificationTime.HasValue Then
-                winnerTime = makeMvhdTime(If(creationTime < modificationTime, creationTime.Value, modificationTime.Value))
-            ElseIf creationTime.HasValue Then
-                winnerTime = makeMvhdTime(creationTime.Value)
-            ElseIf modificationTime.HasValue Then
-                winnerTime = makeMvhdTime(modificationTime.Value)
-            End If
-        End If
-
-        Dim lambda As UpdateTimeFunc =
-            Function(file2, offset)
-                If creationTime.HasValue Then
-                    Dim dd = creationTime.Value + offset
-                    file2.Seek(mvhdStart + 4, IO.SeekOrigin.Begin)
-                    file2.WriteDate(numBytes, dd, creationFix1970)
-                End If
-                If modificationTime.HasValue Then
-                    Dim dd = modificationTime.Value + offset
-                    file2.Seek(mvhdStart + 4 + numBytes, IO.SeekOrigin.Begin)
-                    file2.WriteDate(numBytes, dd, modificationFix1970)
-                End If
-                If Not String.IsNullOrWhiteSpace(cdayString) Then
-                    Dim dd As DateTimeOffset
-                    If DateTimeOffset.TryParse(cdayString, dd) Then
-                        dd = dd + offset
-                        Dim str2 = dd.ToString("yyyy-MM-ddTHH:mm:sszz00")
-                        Dim buf2 = Text.Encoding.ASCII.GetBytes(str2)
-                        If buf2.Length = cdayStringLen Then
-                            file2.Seek(cdayStart + 4, IO.SeekOrigin.Begin)
-                            file2.Write(buf2, 0, buf2.Length)
-                        End If
-                    End If
-                End If
-                If cnthLambda IsNot Nothing Then cnthLambda(file2, offset)
-                Return True
-            End Function
-
-        Return Tuple.Create(winnerTime, lambda, CType(Nothing, GpsCoordinates))
-    End Function
-
-
-    Function Mp4ReadNextBoxInfo(f As IO.Stream, pos As Long, fend As Long, ByRef boxKind As String, ByRef payloadStart As Long, ByRef payloadEnd As Long) As Boolean
-        boxKind = "" : payloadStart = 0 : payloadEnd = 0
-        If pos + 8 > fend Then Return False
-        Dim b(3) As Byte
-        f.Seek(pos, IO.SeekOrigin.Begin)
-        f.Read(b, 0, 4) : If BitConverter.IsLittleEndian Then Array.Reverse(b)
-        Dim size = BitConverter.ToUInt32(b, 0)
-        f.Read(b, 0, 4)
-        Dim kind = ChrW(b(0)) & ChrW(b(1)) & ChrW(b(2)) & ChrW(b(3))
-        If size<> 1 Then
-            If pos + size > fend Then Return False
-            boxKind = kind : payloadStart = pos + 8 : payloadEnd = payloadStart + size - 8 : Return True
-        End If
-        If size = 1 AndAlso pos + 16 <= fend Then
-            ReDim b(7)
-            f.Read(b, 0, 8) : If BitConverter.IsLittleEndian Then Array.Reverse(b)
-            Dim size2 = CLng(BitConverter.ToUInt64(b, 0))
-            If pos + size2 > fend Then Return False
-            boxKind = kind : payloadStart = pos + 16 : payloadEnd = payloadStart + size2 - 16 : Return True
-        End If
-        Return False
-    End Function
-
-    <Runtime.CompilerServices.Extension>
-    Sub Add(Of T, U, V)(this As LinkedList(Of Tuple(Of T, U, V)), arg1 As T, arg2 As U, arg3 As V)
-        this.AddLast(Tuple.Create(Of T, U, V)(arg1, arg2, arg3))
-    End Sub
-
-    ReadOnly TZERO_1904_UTC As DateTime = New DateTime(1904, 1, 1, 0, 0, 0, System.DateTimeKind.Utc)
-    ReadOnly TZERO_1970_UTC As DateTime = New DateTime(1970, 1, 1, 0, 0, 0, System.DateTimeKind.Utc)
-
-    <Runtime.CompilerServices.Extension>
-    Function Read2byte(f As IO.Stream, Optional fileIsLittleEndian As Boolean = False) As UShort
-        Dim b(1) As Byte
-        f.Read(b, 0, 2) : If BitConverter.IsLittleEndian <> fileIsLittleEndian Then Array.Reverse(b)
-        Return BitConverter.ToUInt16(b, 0)
-    End Function
-
-    <Runtime.CompilerServices.Extension>
-    Function Read4byte(f As IO.Stream, Optional fileIsLittleEndian As Boolean = False) As UInteger
-        Dim b(3) As Byte
-        f.Read(b, 0, 4) : If BitConverter.IsLittleEndian <> fileIsLittleEndian Then Array.Reverse(b)
-        Return BitConverter.ToUInt32(b, 0)
-    End Function
-
-    <Runtime.CompilerServices.Extension>
-    Function ReadDate(f As IO.Stream, numBytes As Integer, ByRef fixed1970 As Boolean) As DateTime?
-        ' COMPATIBILITY-BUG: The spec says that these are expressed in seconds since 1904.
-        ' But my brother's Android phone picks them in seconds since 1970.
-        ' I'm going to guess that all dates before 1970 should be 66 years in the future
-        ' Note: I'm applying this correction *before* converting to date. That's because,
-        ' what with leap-years and stuff, it doesn't feel safe the other way around.
-        If numBytes = 4 Then
-            Dim b(3) As Byte
-            f.Read(b, 0, 4) : If BitConverter.IsLittleEndian Then Array.Reverse(b)
-            Dim secs = BitConverter.ToUInt32(b, 0)
-            If secs = 0 Then Return Nothing
-            fixed1970 = (secs < (TZERO_1970_UTC - TZERO_1904_UTC).TotalSeconds)
-            Return If(fixed1970, TZERO_1970_UTC.AddSeconds(secs), TZERO_1904_UTC.AddSeconds(secs))
-        ElseIf numBytes = 8 Then
-            Dim b(7) As Byte
-            f.Read(b, 0, 8) : If BitConverter.IsLittleEndian Then Array.Reverse(b)
-            Dim secs = BitConverter.ToUInt64(b, 0)
-            If secs = 0 Then Return Nothing
-            fixed1970 = (secs < (TZERO_1970_UTC - TZERO_1904_UTC).TotalSeconds)
-            Return If(fixed1970, TZERO_1970_UTC.AddSeconds(secs), TZERO_1904_UTC.AddSeconds(secs))
-        Else
-            Throw New ArgumentException("numBytes")
-        End If
-    End Function
-
-    <Runtime.CompilerServices.Extension>
-    Sub WriteDate(f As IO.Stream, numBytes As Integer, d As DateTime, fix1970 As Boolean)
-        If d.Kind <> System.DateTimeKind.Utc Then Throw New ArgumentException("Can only write UTC dates")
-        If numBytes = 4 Then
-            Dim secs = CUInt(If(fix1970, d - TZERO_1970_UTC, d - TZERO_1904_UTC).TotalSeconds)
-            Dim b = BitConverter.GetBytes(secs) : If BitConverter.IsLittleEndian Then Array.Reverse(b)
-            f.Write(b, 0, 4)
-        ElseIf numBytes = 8 Then
-            Dim secs = CULng(If(fix1970, d - TZERO_1970_UTC, d - TZERO_1904_UTC).TotalSeconds)
-            Dim b = BitConverter.GetBytes(secs) : If BitConverter.IsLittleEndian Then Array.Reverse(b)
-            f.Write(b, 0, 8)
-        Else
-            Throw New ArgumentException("numBytes")
-        End If
-    End Sub
-
-    Structure DateTimeKind
-        Public dt As DateTime
-        Public offset As TimeSpan
-        ' Three modes:
-        ' (1) Time known to be in UTC: DateTime.Kind=UTC, offset=0
-        ' (2) Time known to be in some specific timezone: DateTime.Kind=Local, offset gives that timezone
-        ' (3) Time where nothing about timezone is known: DateTime.Kind=Unspecified, offset=0
-
-        Shared Function Utc(d As DateTime) As DateTimeKind
-            Dim d2 As New DateTime(d.Ticks, System.DateTimeKind.Utc)
-            Return New DateTimeKind With {.dt = d2, .offset = Nothing}
-End Function
-        Shared Function Unspecified(d As DateTime) As DateTimeKind
-            Dim d2 As New DateTime(d.Ticks, System.DateTimeKind.Unspecified)
-            Return New DateTimeKind With {.dt = d2, .offset = Nothing}
-End Function
-        Shared Function Local(d As DateTimeOffset) As DateTimeKind
-            Dim d2 As New DateTime(d.Ticks, System.DateTimeKind.Local)
-            Return New DateTimeKind With {.dt = d2, .offset = d.Offset}
-End Function
-
-        Public Overrides Function ToString() As String
-            If dt.Kind = System.DateTimeKind.Utc Then
-                Return dt.ToString("yyyy:MM:ddTHH:mm:ssZ")
-            ElseIf dt.Kind = System.DateTimeKind.Unspecified Then
-                Return dt.ToString("yyyy:MM:dd HH:mm:ss")
-            ElseIf dt.Kind = System.DateTimeKind.Local Then
-                Return dt.ToString("yyyy:MM:dd HH:mm:ss") & offset.Hours.ToString("+00;-00") & "00"
-            Else
-                Throw New Exception("Invalid DateTimeKind")
-            End If
-        End Function
-    End Structure
-
-
-    Public Class AsyncPump
-        Public Shared Sub Run(func As Func(Of Task))
-            Dim prevCtx = SynchronizationContext.Current
-            Try
-                Dim syncCtx As New SingleThreadSynchronizationContext()
-                SynchronizationContext.SetSynchronizationContext(syncCtx)
-                Dim t = func()
-                If t Is Nothing Then Throw New InvalidOperationException("No task provided.")
-                t.ContinueWith(Sub() syncCtx.Complete(), TaskScheduler.Default)
-                syncCtx.RunOnCurrentThread()
-                t.GetAwaiter().GetResult()
-            Finally
-                SynchronizationContext.SetSynchronizationContext(prevCtx)
-            End Try
-        End Sub
-
-        Private NotInheritable Class SingleThreadSynchronizationContext : Inherits SynchronizationContext
-            Private ReadOnly m_queue As New Concurrent.BlockingCollection(Of Tuple(Of SendOrPostCallback, Object))
-            Private ReadOnly m_thread As Thread = Thread.CurrentThread
-            Public Overrides Sub Post(d As SendOrPostCallback, state As Object)
-                m_queue.Add(Tuple.Create(d, state))
-            End Sub
-            Public Overrides Sub Send(d As SendOrPostCallback, state As Object)
-                Throw New NotSupportedException("Synchronously sending is not supported.")
-            End Sub
-            Public Sub RunOnCurrentThread()
-                For Each workItem In m_queue.GetConsumingEnumerable()
-                    workItem.Item1.Invoke(workItem.Item2)
-                Next
-            End Sub
-            Public Sub Complete()
-                m_queue.CompleteAdding()
-            End Sub
-        End Class
-    End Class
-
-
-End Module
 
 */
