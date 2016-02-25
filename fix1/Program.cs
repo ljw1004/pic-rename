@@ -2,17 +2,31 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 using System.Net.Http;
 using System.Threading;
 using System.IO;
 using System.Xml.Linq;
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 
 static partial class Program
 {
+    static void Test()
+    {
+        var fns = Directory.GetFiles("test");
+        foreach (var fn in fns)
+        {
+            var ft = FilestampTime(fn);
+            var mt = MetadataTimeAndGps(fn);
+            Console.WriteLine($"{fn}\r\n    ft={ft?.Item1}\r\n    mt={mt?.Item1}\r\n    gps={mt?.Item3}");
+        }
+    }
+
+
     static void Main(string[] args)
     {
+        Test(); return;
+
         if (BingMapsKey == "") Console.WriteLine("THIS VERSION HAS BEEN BUILT WITHOUT GPS SUPPORT");
         string cmdFn = "", cmdPattern = "", cmdError = ""; TimeSpan? cmdOffset = null;
         var cmdArgs = new LinkedList<string>(args);
@@ -86,7 +100,7 @@ static partial class Program
         while (filesToDo.Count > 0 || gpsToDo.Count > 0)
         {
             if (filesToDo.Count == 0) DoGps(gpsToDo, filesToDo);
-            if (filesToDoCount == 0) break;
+            if (filesToDo.Count == 0) break;
             var fileToDo = filesToDo.Dequeue();
 
             if (!fileToDo.hasInitialScan)
@@ -95,7 +109,7 @@ static partial class Program
                 var mtt = MetadataTimeAndGps(fileToDo.fn);
                 var ftt = FilestampTime(fileToDo.fn);
                 if (mtt == null) { Console.WriteLine("Not an image/video - \"{0}\"", Path.GetFileName(fileToDo.fn)); continue; }
-                var mt = mtt.Item1, ft = ftt.Item1;
+                var mt = mtt.Item1; var ft = ftt.Item1;
                 if (mt.HasValue)
                 {
                     fileToDo.setter = mtt.Item2;
@@ -179,7 +193,7 @@ static partial class Program
                 string patternExt = null;
                 foreach (var potentialExt in new[] { ".jpg", ".mp4", ".mov", ".jpeg" })
                 {
-                    if (!pattern.ToLower.EndsWith(potentialExt)) continue;
+                    if (!pattern.ToLower().EndsWith(potentialExt)) continue;
                     patternExt = pattern.Substring(pattern.Length - potentialExt.Length);
                     pattern = pattern.Substring(0, pattern.Length - potentialExt.Length);
                     break;
@@ -187,126 +201,143 @@ static partial class Program
                 if (patternExt == null) patternExt = Path.GetExtension(fileToDo.fn);
                 //
                 // 2. Parse the pattern-string into its constitutent parts
-                Dim patternSplit0 = pattern.Split({ "%"c})
-                Dim patternSplit As New List(Of String)
-                If patternSplit0(0).Length > 0 Then patternSplit.Add(patternSplit0(0))
-                For i = 1 To patternSplit0.Length - 1
-                    Dim s = "%" & patternSplit0(i)
-                    If Not s.StartsWith("%{") Then Console.WriteLine("ERROR: wrong pattern") : Return
-                    Dim ib = s.IndexOf("}")
-                    patternSplit.Add(s.Substring(0, ib + 1))
-                    If ib<> s.Length - 1 Then patternSplit.Add(s.Substring(ib + 1))
-                Next
-                Dim patternParts As New LinkedList(Of PatternPart)
+                var patternSplit0 = pattern.Split(new[] { '%' });
+                var patternSplit = new List<string>();
+                if (patternSplit0[0].Length > 0) patternSplit.Add(patternSplit0[0]);
+                for (int i = 1; i < patternSplit0.Length; i++)
+                {
+                    var s = "%" + patternSplit0[i];
+                    if (!s.StartsWith("%{")) { Console.WriteLine("ERROR: wrong pattern"); return; }
+                    var ib = s.IndexOf("}");
+                    patternSplit.Add(s.Substring(0, ib + 1));
+                    if (ib != s.Length - 1) patternSplit.Add(s.Substring(ib + 1));
+                }
+                var patternParts = new LinkedList<PatternPart>();
 
-                For Each rsplit In patternSplit
-                    Dim part As New PatternPart
-                    part.pattern = rsplit
+                foreach (var rsplit in patternSplit)
+                {
+                    var part = new PatternPart();
+                    part.pattern = rsplit;
 
-                    If Not rsplit.StartsWith("%") Then
-                        part.generator = Function() rsplit
-                        part.matcher = Function(rr)
-                                           If rr.Length < rsplit.Length Then Return -1
-                                           If rr.Substring(0, rsplit.Length) = rsplit Then Return rsplit.Length
-                                           Return - 1
-                                       End Function
-                        Dim prevPart = patternParts.LastOrDefault
-                        If prevPart IsNot Nothing AndAlso prevPart.matcher Is Nothing Then
-                            prevPart.matcher = Function(rr)
-                                                   Dim i = rr.IndexOf(rsplit)
-                                                   If i = -1 Then Return rr.Length
-                                                   Return i
-                                               End Function
-                        End If
-                        patternParts.AddLast(part)
-                        Continue For
-                    End If
+                    if (!rsplit.StartsWith("%"))
+                    {
+                        part.generator = (_1,_2,_3) => rsplit;
+                        part.matcher = (rr) =>
+                        {
+                            if (rr.Length < rsplit.Length) return -1;
+                            if (rr.Substring(0, rsplit.Length) == rsplit) return rsplit.Length;
+                            return -1;
+                        };
+                        var prevPart = patternParts.LastOrDefault();
+                        if (prevPart != null && prevPart.matcher == null)
+                        {
+                            prevPart.matcher = (rr) =>
+                            {
+                                var i = rr.IndexOf(rsplit);
+                                if (i == -1) return rr.Length;
+                                return i;
+                            };
+                        }
+                        patternParts.AddLast(part);
+                        continue;
+                    }
 
-                    If rsplit.StartsWith("%{fn}") Then
-                        part.generator = Function(fn2, dt2, pl2) fn2
-                        part.matcher = Nothing ' must be filled in by the next part
-                        patternParts.AddLast(part)
-                        Continue For
-                    End If
+                    if (rsplit.StartsWith("%{fn}"))
+                    {
+                        part.generator = (fn2, dt2, pl2) => fn2;
+                        part.matcher = null; // must be filled in by the next part
+                        patternParts.AddLast(part);
+                        continue;
+                    }
 
-                    If rsplit.StartsWith("%{place}") Then
-                        part.generator = Function(fn2, dt2, pl2) pl2
-                        part.matcher = Nothing ' must be filled in by the next part
-                        patternParts.AddLast(part)
-                        Continue For
-                    End If
+                    if (rsplit.StartsWith("%{place}"))
+                    {
+                        part.generator = (fn2, dt2, pl2) => pl2;
+                        part.matcher = null; // must be filled in by the next part
+                        patternParts.AddLast(part);
+                        continue;
+                    }
 
-                    Dim escapes = {"%{datetime}", "yyyy.MM.dd - HH.mm.ss", "####.##.## - ##.##.##",
-                                   "%{date}", "yyyy.MM.dd", "####.##.##",
-                                   "%{time}", "HH.mm.ss", "##.##.##",
-                                   "%{year}", "yyyy", "####",
-                                   "%{month}", "MM", "##",
-                                   "%{day}", "dd", "##",
-                                   "%{hour}", "HH", "##",
-                                   "%{minute}", "mm", "##",
-                                   "%{second}", "ss", "##"}
-                    Dim escape = "", fmt = "", islike = ""
-                    For i = 0 To escapes.Length - 1 Step 3
-                        If Not rsplit.StartsWith(escapes(i)) Then Continue For
-                        escape = escapes(i)
-                        fmt = escapes(i + 1)
-                        islike = escapes(i + 2)
-                        Exit For
-                    Next
-                    If escape = "" Then Console.WriteLine("Unrecognized {0}", rsplit) : Return
-                    part.generator = Function(fn2, dt2, pl2) dt2.ToString(fmt)
-                    part.matcher = Function(rr)
-                                       If rr.Length < islike.Length Then Return -1
-                                       If rr.Substring(0, islike.Length) Like islike Then Return islike.Length
-                                       Return - 1
-                                   End Function
-                    patternParts.AddLast(part)
-                Next
+                    var escapes = new[] {"%{datetime}", "yyyy.MM.dd - HH.mm.ss", @"\d\d\d\d\.\d\d\.\d\d - \d\d\.\d\d\.\d\d",
+                                   "%{date}", "yyyy.MM.dd", @"\d\d\d\d\.\d\d\.\d\d",
+                                   "%{time}", "HH.mm.ss", @"\d\d\.\d\d\.\d\d",
+                                   "%{year}", "yyyy", @"\d\d\d\d",
+                                   "%{month}", "MM", @"\d\d",
+                                   "%{day}", "dd", @"\d\d",
+                                   "%{hour}", "HH", @"\d\d",
+                                   "%{minute}", "mm", @"\d\d",
+                                   "%{second}", "ss", @"\d\d"};
+                    string escape = "", fmt = "", regex = "";
+                    for (int i = 0; i < escapes.Length; i += 3)
+                    {
+                        if (!rsplit.StartsWith(escapes[i])) continue;
+                        escape = escapes[i];
+                        fmt = escapes[i + 1];
+                        regex = "^" + escapes[i + 2] + "$";
+                        break;
+                    }
+                    if (escape == "") { Console.WriteLine("Unrecognized {0}", rsplit); return; }
+                    part.generator = (fn2, dt2, pl2) => dt2.ToString(fmt);
+                    part.matcher = (rr) =>
+                    {
+                        if (rr.Length < fmt.Length) return -1;
+                        if (new Regex(regex).IsMatch(rr.Substring(0, fmt.Length))) return fmt.Length;
+                        return -1;
+                    };
+                    patternParts.AddLast(part);
+                }
 
-                ' The last part, if it was %{fn} or %{place} will match
-                ' up to the remainder of the original filename
-                Dim lastPart = patternParts.Last.Value
-                If lastPart.matcher Is Nothing Then lastPart.matcher = Function(rr) rr.Length
+                // The last part, if it was %{fn} or %{place} will match
+                // up to the remainder of the original filename
+                var lastPart = patternParts.Last.Value;
+                if (lastPart.matcher != null) lastPart.matcher = (rr) => rr.Length;
 
-                '
-                ' 3. Attempt to match the existing filename against the pattern
-                Dim basefn = IO.Path.GetFileNameWithoutExtension(fileToDo.fn)
-                Dim matchremainder = basefn
-                Dim matchParts As New LinkedList(Of PatternPart)(patternParts)
-                While matchParts.Count > 0 AndAlso matchremainder.Length > 0
-                    Dim matchPart As PatternPart = matchParts.First.Value
-                    Dim matchLength = matchPart.matcher(matchremainder)
-                    If matchLength = -1 Then Exit While
-                    matchParts.RemoveFirst()
-                    If matchPart.pattern = "%{fn}" Then basefn = matchremainder.Substring(0, matchLength)
-                    matchremainder = matchremainder.Substring(matchLength)
-                End While
+                //
+                // 3. Attempt to match the existing filename against the pattern
+                var basefn = Path.GetFileNameWithoutExtension(fileToDo.fn);
+                var matchremainder = basefn;
+                var matchParts = new LinkedList<PatternPart>(patternParts);
+                while (matchParts.Count > 0 && matchremainder.Length > 0)
+                {
+                    var matchPart = matchParts.First.Value;
+                    var matchLength = matchPart.matcher(matchremainder);
+                    if (matchLength == -1) break;
+                    matchParts.RemoveFirst();
+                    if (matchPart.pattern == "%{fn}") basefn = matchremainder.Substring(0, matchLength);
+                    matchremainder = matchremainder.Substring(matchLength);
+                }
 
-                If matchremainder.Length = 0 AndAlso matchParts.Count = 2 AndAlso matchParts(0).pattern = " - " AndAlso matchParts(1).pattern = "%{place}" Then
-                    ' hack if you had pattern like "%{year} - %{fn} - %{place}" so
-                    ' it will match a filename like "2012 - file.jpg" which lacks a place
-                    matchParts.Clear()
-                End If
+                if (matchremainder.Length == 0 && matchParts.Count == 2 && matchParts.First.Value.pattern == " - " && matchParts.Last.Value.pattern == "%{place}")
+                {
+                    // hack if you had pattern like "%{year} - %{fn} - %{place}" so
+                    // it will match a filename like "2012 - file.jpg" which lacks a place
+                    matchParts.Clear();
+                }
 
-                If matchParts.Count <> 0 OrElse matchremainder.Length > 0 Then
-                    ' failed to do a complete match
-                    basefn = IO.Path.GetFileNameWithoutExtension(fileToDo.fn)
-                End If
-                '
-                ' 4. Figure out the new filename
-                Dim newfn = IO.Path.GetDirectoryName(fileToDo.fn) & "\"
-                For Each patternPart In patternParts
-                    newfn &= patternPart.generator(basefn, fileToDo.localTime, fileToDo.hasGpsResult)
-                Next
-                If patternParts.Count > 2 AndAlso patternParts.Last.Value.pattern = "%{place}" AndAlso patternParts.Last.Previous.Value.pattern = " - " AndAlso String.IsNullOrEmpty(fileToDo.hasGpsResult) Then
-                    If newfn.EndsWith(" - ") Then newfn = newfn.Substring(0, newfn.Length - 3)
-                End If
-                newfn &= patternExt
-                If fileToDo.fn <> newfn Then
-                   If IO.File.Exists(newfn) Then Console.WriteLine("Already exists - " & IO.Path.GetFileName(newfn)) : Continue While
-                    Console.WriteLine(IO.Path.GetFileName(newfn))
-                    IO.File.Move(fileToDo.fn, newfn)
-                End If
+                if (matchParts.Count != 0 || matchremainder.Length > 0)
+                {
+                    // failed to do a complete match
+                    basefn = Path.GetFileNameWithoutExtension(fileToDo.fn);
+                }
+
+                //
+                // 4. Figure out the new filename
+                var newfn = Path.GetDirectoryName(fileToDo.fn) + "\\";
+                foreach (var patternPart in patternParts)
+                {
+                    newfn += patternPart.generator(basefn, fileToDo.localTime, fileToDo.hasGpsResult);
+                }
+                if (patternParts.Count > 2 && patternParts.Last.Value.pattern == "%{place}" && patternParts.Last.Previous.Value.pattern == " - " && String.IsNullOrEmpty(fileToDo.hasGpsResult))
+                {
+                    if (newfn.EndsWith(" - ")) newfn = newfn.Substring(0, newfn.Length - 3);
+                }
+                newfn += patternExt;
+                if (fileToDo.fn != newfn)
+                {
+                    if (File.Exists(newfn)) { Console.WriteLine("Already exists - " + Path.GetFileName(newfn)); continue; }
+                    Console.WriteLine(Path.GetFileName(newfn));
+                    File.Move(fileToDo.fn, newfn);
+                }
             }
 
         }
@@ -393,6 +424,7 @@ static partial class Program
     {
         public double Latitude;
         public double Longitude;
+        public override string ToString() => $"lat={Latitude:0.00} long={Longitude:0.00}";
     }
 
     class PatternPart
@@ -855,7 +887,7 @@ static partial class Program
         if (numBytes == 4)
         {
             var b = new byte[4];
-            f.Read(b, 0, 4);
+            f.Read(b, 0, 4); if (BitConverter.IsLittleEndian) Array.Reverse(b);
             var secs = BitConverter.ToUInt32(b, 0);
             if (secs == 0) return null;
             fixed1970 = (secs < (TZERO_1970_UTC - TZERO_1904_UTC).TotalSeconds);
@@ -864,7 +896,7 @@ static partial class Program
         else if (numBytes == 8)
         {
             var b = new byte[8];
-            f.Read(b, 0, 8);
+            f.Read(b, 0, 8); if (BitConverter.IsLittleEndian) Array.Reverse(b);
             var secs = BitConverter.ToUInt64(b, 0);
             if (secs == 0) return null;
             fixed1970 = (secs < (TZERO_1970_UTC - TZERO_1904_UTC).TotalSeconds);
@@ -940,27 +972,3 @@ struct DateTimeKind
 }
 
 
-/*
-
-Module Module1
-
-    Sub Test()
-        For Each fn In
-{"eg-android - 2013.12.28 - 15.48 PST.jpg", "eg-android - 2013.12.28 - 15.48 PST.mp4",
-                        "eg-canon-ixus - 2013.12.15 - 07.30 PST.jpg", "eg-canon-ixus - 2013.12.15 - 07.30 PST.mov",
-                        "eg-canon-powershot - 2013.12.28 - 15.51 PST.jpg", "eg-canon-powershot - 2013.12.28 - 15.51 PST.mov",
-                        "eg-iphone4s - 2013.12.28 - 15.49 PST.jpg", "eg-iphone4s - 2013.12.28 - 15.49 PST.mov",
-                        "eg-iphone5 - 2013.12.10 - 15.40 PST.jpg", "eg-iphone5 - 2013.12.09 - 15.21 PST.mov",
-                        "eg-sony-cybershot - 2013.12.15 - 07.30 PST.jpg", "eg-sony-cybershot - 2013.12.15 - 07.30 PST.mp4",
-                        "eg-wp8 - 2013.12.15 - 07.33 PST.jpg", "eg-wp8 - 2013.12.15 - 07.33 PST.mp4",
-                        "eg-screenshot.png", "eg-notapic.txt"}
-Dim ft = FilestampTime($"test\{fn}")?.Item1
-            Dim mt = MetadataTimeAndGps($"test\{fn}")?.Item1
-            Console.WriteLine($"{fn}{vbCrLf}    ft={ft}{vbCrLf}    mt={mt}")
-        Next
-    End Sub
-
-
-
-
-*/

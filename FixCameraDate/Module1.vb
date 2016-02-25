@@ -6,21 +6,16 @@ Imports <xmlns="http://schemas.microsoft.com/search/local/ws/rest/v1">
 Module Module1
 
     Sub Test()
-        For Each fn In {"eg-android - 2013.12.28 - 15.48 PST.jpg", "eg-android - 2013.12.28 - 15.48 PST.mp4",
-                        "eg-canon-ixus - 2013.12.15 - 07.30 PST.jpg", "eg-canon-ixus - 2013.12.15 - 07.30 PST.mov",
-                        "eg-canon-powershot - 2013.12.28 - 15.51 PST.jpg", "eg-canon-powershot - 2013.12.28 - 15.51 PST.mov",
-                        "eg-iphone4s - 2013.12.28 - 15.49 PST.jpg", "eg-iphone4s - 2013.12.28 - 15.49 PST.mov",
-                        "eg-iphone5 - 2013.12.10 - 15.40 PST.jpg", "eg-iphone5 - 2013.12.09 - 15.21 PST.mov",
-                        "eg-sony-cybershot - 2013.12.15 - 07.30 PST.jpg", "eg-sony-cybershot - 2013.12.15 - 07.30 PST.mp4",
-                        "eg-wp8 - 2013.12.15 - 07.33 PST.jpg", "eg-wp8 - 2013.12.15 - 07.33 PST.mp4",
-                        "eg-screenshot.png", "eg-notapic.txt"}
-            Dim ft = FilestampTime($"test\{fn}")?.Item1
-            Dim mt = MetadataTimeAndGps($"test\{fn}")?.Item1
-            Console.WriteLine($"{fn}{vbCrLf}    ft={ft}{vbCrLf}    mt={mt}")
+        Dim fns = IO.Directory.GetFiles("test")
+        For Each fn In fns
+            Dim ft = FilestampTime(fn)
+            Dim mt = MetadataTimeAndGps(fn)
+            Console.WriteLine($"{fn}{vbCrLf}    ft={ft?.Item1}{vbCrLf}    mt={mt?.Item1}{vbCrLf}    gps={mt?.Item3}")
         Next
     End Sub
 
     Sub Main(args As String())
+        Test() : Return
         ' Goals:
         ' (1) If you have shots from one or more devices, rename them to local time when the shot was taken
         ' (2) If you had taken shots on holiday without having fixed the timezone on your camera, fix their metadata timestamps
@@ -43,7 +38,7 @@ Module Module1
 
         ' Our objective is to rename the file according to "local" time when the photo/video was taken, without the timezone information.
 
-        If BingMapsKey.BingMapsKey = "" Then Console.WriteLine("THIS VERSION HAS BEEN BUILT WITHOUT GPS SUPPORT")
+        If BingMapsKey = "" Then Console.WriteLine("THIS VERSION HAS BEEN BUILT WITHOUT GPS SUPPORT")
         Dim cmdFn = "", cmdPattern = "", cmdOffset As TimeSpan? = Nothing, cmdError = ""
         Dim cmdArgs = New LinkedList(Of String)(args)
         ' Get the filename
@@ -142,7 +137,7 @@ Module Module1
 
             ' The only thing that requires GPS is if (1) we're doing a rename, (2) the
             ' pattern includes place, (3) the file actually has a GPS signature
-            If cmdPattern.Contains("%{place}") AndAlso fileToDo.gpsCoordinates IsNot Nothing AndAlso fileToDo.hasGpsResult Is Nothing AndAlso Not String.IsNullOrEmpty(BingMapsKey.BingMapsKey) Then
+            If cmdPattern.Contains("%{place}") AndAlso fileToDo.gpsCoordinates IsNot Nothing AndAlso fileToDo.hasGpsResult Is Nothing AndAlso Not String.IsNullOrEmpty(BingMapsKey) Then
                 gpsNextRequestId += 1
                 gpsToDo.Add(gpsNextRequestId, fileToDo)
                 If gpsToDo.Count >= 50 Then DoGps(gpsToDo, filesToDo)
@@ -351,8 +346,7 @@ Module Module1
         For Each kv In gpsToDo
             queryData &= $"{kv.Key}|en-US|neighborhood|{kv.Value.gpsCoordinates.Latitude:0.000000}|{kv.Value.gpsCoordinates.Longitude:0.000000}{vbCrLf}"
         Next
-        Dim key = BingMapsKey.BingMapsKey
-        Dim queryUri = $"http://spatial.virtualearth.net/REST/v1/dataflows/geocode?input=pipe&key={key}"
+        Dim queryUri = $"http://spatial.virtualearth.net/REST/v1/dataflows/geocode?input=pipe&key={BingMapsKey}"
         Console.Write(".")
         Dim statusResp = http.PostAsync(queryUri, New StringContent(queryData)).GetAwaiter().GetResult()
         If Not statusResp.IsSuccessStatusCode Then Console.WriteLine($"ERROR {statusResp.StatusCode} - {statusResp.ReasonPhrase}") : Return
@@ -365,7 +359,7 @@ Module Module1
         While True
             Thread.Sleep(2000)
             Console.Write(".")
-            Dim statusRaw = http.GetStringAsync($"{statusUri}?key={key}&output=xml").GetAwaiter().GetResult()
+            Dim statusRaw = http.GetStringAsync($"{statusUri}?key={BingMapsKey}&output=xml").GetAwaiter().GetResult()
             Console.Write(".")
             Dim statusXml = XDocument.Parse(statusRaw)
             Dim status = statusXml...<Status>.Value
@@ -379,7 +373,7 @@ Module Module1
         End While
         If String.IsNullOrEmpty(resultUri) Then Console.WriteLine("ERROR no results") : Return
 
-        Dim resultRaw = http.GetStringAsync($"{resultUri}?key={key}&output=json").GetAwaiter().GetResult()
+        Dim resultRaw = http.GetStringAsync($"{resultUri}?key={BingMapsKey}&output=json").GetAwaiter().GetResult()
         Console.Write(".")
         Dim resultLines = resultRaw.Split({vbCr(0), vbLf(0)}, StringSplitOptions.RemoveEmptyEntries).Skip(2).ToArray()
         For Each result In resultLines
@@ -460,6 +454,9 @@ Module Module1
     Class GpsCoordinates
         Public Latitude As Double
         Public Longitude As Double
+        Public Overrides Function ToString() As String
+            Return $"lat={Latitude:0.00} long={Longitude:0.00}"
+        End Function
     End Class
 
     Function MetadataTimeAndGps(fn As String) As Tuple(Of DateTimeKind?, UpdateTimeFunc, GpsCoordinates)
