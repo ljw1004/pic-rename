@@ -25,6 +25,8 @@ static partial class Program
 
     static void Main(string[] args)
     {
+        var ff2 = Directory.GetFiles(".", "*.*");
+
         Test(); return;
 
         if (BingMapsKey == "") Console.WriteLine("THIS VERSION HAS BEEN BUILT WITHOUT GPS SUPPORT");
