@@ -106,6 +106,7 @@ Module Module1
 
         While filesToDo.Count > 0 OrElse gpsToDo.Count > 0
             If filesToDo.Count = 0 Then DoGps(gpsToDo, filesToDo)
+            If filesToDo.Count = 0 Then Exit While
             Dim fileToDo = filesToDo.Dequeue()
 
             If Not fileToDo.hasInitialScan Then
@@ -676,10 +677,10 @@ Module Module1
         End If
 
         ' The "CNTH" binary blob consists of 8bytes of unknown, followed by EXIF data
-        Dim cnthTime As DateTimeKind? = Nothing, cnthLambda As UpdateTimeFunc = Nothing
+        Dim cnthTime As DateTimeKind? = Nothing, cnthLambda As UpdateTimeFunc = Nothing, cnthGps As GpsCoordinates = Nothing
         If cnthStart <> 0 AndAlso cnthEnd - cnthStart > 16 Then
             Dim exif_ft = ExifTime(file, cnthStart + 8, cnthEnd)
-            cnthTime = exif_ft.Item1 : cnthLambda = exif_ft.Item2
+            cnthTime = exif_ft.Item1 : cnthLambda = exif_ft.Item2 : cnthGps = exif_ft.Item3
         End If
 
         Dim winnerTime As DateTimeKind? = Nothing
@@ -730,7 +731,7 @@ Module Module1
                 Return True
             End Function
 
-        Return Tuple.Create(winnerTime, lambda, CType(Nothing, GpsCoordinates))
+        Return Tuple.Create(winnerTime, lambda, cnthGps)
     End Function
 
 

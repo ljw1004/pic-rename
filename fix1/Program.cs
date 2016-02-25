@@ -7,6 +7,7 @@ using System.Net.Http;
 using System.Threading;
 using System.IO;
 using System.Xml.Linq;
+using System.Diagnostics;
 
 static partial class Program
 {
@@ -82,6 +83,234 @@ static partial class Program
         var gpsNextRequestId = 1;
         foreach (var globFile in globFiles) filesToDo.Enqueue(new FileToDo { fn = globFile });
 
+        while (filesToDo.Count > 0 || gpsToDo.Count > 0)
+        {
+            if (filesToDo.Count == 0) DoGps(gpsToDo, filesToDo);
+            if (filesToDoCount == 0) break;
+            var fileToDo = filesToDo.Dequeue();
+
+            if (!fileToDo.hasInitialScan)
+            {
+                fileToDo.hasInitialScan = true;
+                var mtt = MetadataTimeAndGps(fileToDo.fn);
+                var ftt = FilestampTime(fileToDo.fn);
+                if (mtt == null) { Console.WriteLine("Not an image/video - \"{0}\"", Path.GetFileName(fileToDo.fn)); continue; }
+                var mt = mtt.Item1, ft = ftt.Item1;
+                if (mt.HasValue)
+                {
+                    fileToDo.setter = mtt.Item2;
+                    fileToDo.gpsCoordinates = mtt.Item3;
+                    if (mt.Value.dt.Kind == System.DateTimeKind.Unspecified || mt.Value.dt.Kind == System.DateTimeKind.Local)
+                    {
+                        // If dt.kind=Unspecified (e.g. EXIF, Sony), then the time is by assumption already local from when the picture was shot
+                        // If dt.kind=Local (e.g. iPhone-MOV), then the time is local, and also indicates its timezone offset
+                        fileToDo.localTime = mt.Value.dt;
+                    }
+                    else if (mt.Value.dt.Kind == System.DateTimeKind.Utc)
+                    {
+                        // If dt.Kind=UTC (e.g. Android), then time is in UTC, and we don't know how to read timezone.
+                        fileToDo.localTime = mt.Value.dt.ToLocalTime(); // Best we can do is guess the timezone of the computer
+                    }
+                }
+                else
+                {
+                    fileToDo.setter = ftt.Item2;
+                    if (ft.dt.Kind == System.DateTimeKind.Unspecified)
+                    {
+                        // e.g. Windows Phone when we got the date from the filename
+                        fileToDo.localTime = ft.dt;
+                    }
+                    else if (ft.dt.Kind == System.DateTimeKind.Utc)
+                    {
+                        // e.g. all other files where we got the date from the filestamp
+                        fileToDo.localTime = ft.dt.ToLocalTime(); // the best we can do is guess that the photo was taken in the timezone as this computer now
+                    }
+                    else
+                    {
+                        throw new Exception("Expected filetimes to be in UTC");
+                    }
+                }
+            }
+
+            // The only thing that requires GPS is if (1) we're doing a rename, (2) the
+            // pattern includes place, (3) the file actually has a GPS signature
+            if (cmdPattern.Contains("%{place}") && fileToDo.gpsCoordinates != null && fileToDo.hasGpsResult == null && !string.IsNullOrEmpty(BingMapsKey))
+            {
+                gpsNextRequestId += 1;
+                gpsToDo.Add(gpsNextRequestId, fileToDo);
+                if (gpsToDo.Count >= 50) DoGps(gpsToDo, filesToDo);
+                continue;
+            }
+
+            // Otherwise, by assumption here, either we have GPS result or we don't need it
+
+            if (cmdPattern == "" && !cmdOffset.HasValue)
+            {
+                Console.WriteLine("\"{0}\": {1:yyyy.MM.dd - HH.mm.ss}", Path.GetFileName(fileToDo.fn), fileToDo.localTime);
+            }
+
+
+            if (cmdOffset.HasValue)
+            {
+                using (var file = new FileStream(fileToDo.fn, FileMode.Open, FileAccess.ReadWrite))
+                {
+                    var prevTime = fileToDo.localTime;
+                    var r = fileToDo.setter(file, cmdOffset.Value);
+                    if (r)
+                    {
+                        fileToDo.localTime += cmdOffset.Value;
+                        if (cmdPattern == "") Console.WriteLine("\"{0}\": {1:yyyy.MM.dd - HH.mm.ss}, corrected from {2:yyyy.MM.dd - HH.mm.ss}", Path.GetFileName(fileToDo.fn), fileToDo.localTime, prevTime);
+                    }
+                }
+            }
+
+
+            if (cmdPattern != "")
+            {
+                // Filename heuristics:
+                // (1) If the user omitted an extension from the rename string, then we re-use the one that was given to us
+                // (2) If the filename already matched our datetime format, then we figure out what was the base filename
+                if (!cmdPattern.Contains("%{fn}")) { Console.WriteLine("Please include %{fn} in the pattern"); return; }
+                if (cmdPattern.Contains("\\")) { Console.WriteLine("Folders not allowed in pattern"); return; }
+                if (cmdPattern.Split(new[] { "%{fn}" }, StringSplitOptions.None).Length != 2) { Console.WriteLine("Please include %{fn} only once in the pattern"); return; }
+                //
+                // 1. Extract out the extension
+                var pattern = cmdPattern;
+                string patternExt = null;
+                foreach (var potentialExt in new[] { ".jpg", ".mp4", ".mov", ".jpeg" })
+                {
+                    if (!pattern.ToLower.EndsWith(potentialExt)) continue;
+                    patternExt = pattern.Substring(pattern.Length - potentialExt.Length);
+                    pattern = pattern.Substring(0, pattern.Length - potentialExt.Length);
+                    break;
+                }
+                if (patternExt == null) patternExt = Path.GetExtension(fileToDo.fn);
+                //
+                // 2. Parse the pattern-string into its constitutent parts
+                Dim patternSplit0 = pattern.Split({ "%"c})
+                Dim patternSplit As New List(Of String)
+                If patternSplit0(0).Length > 0 Then patternSplit.Add(patternSplit0(0))
+                For i = 1 To patternSplit0.Length - 1
+                    Dim s = "%" & patternSplit0(i)
+                    If Not s.StartsWith("%{") Then Console.WriteLine("ERROR: wrong pattern") : Return
+                    Dim ib = s.IndexOf("}")
+                    patternSplit.Add(s.Substring(0, ib + 1))
+                    If ib<> s.Length - 1 Then patternSplit.Add(s.Substring(ib + 1))
+                Next
+                Dim patternParts As New LinkedList(Of PatternPart)
+
+                For Each rsplit In patternSplit
+                    Dim part As New PatternPart
+                    part.pattern = rsplit
+
+                    If Not rsplit.StartsWith("%") Then
+                        part.generator = Function() rsplit
+                        part.matcher = Function(rr)
+                                           If rr.Length < rsplit.Length Then Return -1
+                                           If rr.Substring(0, rsplit.Length) = rsplit Then Return rsplit.Length
+                                           Return - 1
+                                       End Function
+                        Dim prevPart = patternParts.LastOrDefault
+                        If prevPart IsNot Nothing AndAlso prevPart.matcher Is Nothing Then
+                            prevPart.matcher = Function(rr)
+                                                   Dim i = rr.IndexOf(rsplit)
+                                                   If i = -1 Then Return rr.Length
+                                                   Return i
+                                               End Function
+                        End If
+                        patternParts.AddLast(part)
+                        Continue For
+                    End If
+
+                    If rsplit.StartsWith("%{fn}") Then
+                        part.generator = Function(fn2, dt2, pl2) fn2
+                        part.matcher = Nothing ' must be filled in by the next part
+                        patternParts.AddLast(part)
+                        Continue For
+                    End If
+
+                    If rsplit.StartsWith("%{place}") Then
+                        part.generator = Function(fn2, dt2, pl2) pl2
+                        part.matcher = Nothing ' must be filled in by the next part
+                        patternParts.AddLast(part)
+                        Continue For
+                    End If
+
+                    Dim escapes = {"%{datetime}", "yyyy.MM.dd - HH.mm.ss", "####.##.## - ##.##.##",
+                                   "%{date}", "yyyy.MM.dd", "####.##.##",
+                                   "%{time}", "HH.mm.ss", "##.##.##",
+                                   "%{year}", "yyyy", "####",
+                                   "%{month}", "MM", "##",
+                                   "%{day}", "dd", "##",
+                                   "%{hour}", "HH", "##",
+                                   "%{minute}", "mm", "##",
+                                   "%{second}", "ss", "##"}
+                    Dim escape = "", fmt = "", islike = ""
+                    For i = 0 To escapes.Length - 1 Step 3
+                        If Not rsplit.StartsWith(escapes(i)) Then Continue For
+                        escape = escapes(i)
+                        fmt = escapes(i + 1)
+                        islike = escapes(i + 2)
+                        Exit For
+                    Next
+                    If escape = "" Then Console.WriteLine("Unrecognized {0}", rsplit) : Return
+                    part.generator = Function(fn2, dt2, pl2) dt2.ToString(fmt)
+                    part.matcher = Function(rr)
+                                       If rr.Length < islike.Length Then Return -1
+                                       If rr.Substring(0, islike.Length) Like islike Then Return islike.Length
+                                       Return - 1
+                                   End Function
+                    patternParts.AddLast(part)
+                Next
+
+                ' The last part, if it was %{fn} or %{place} will match
+                ' up to the remainder of the original filename
+                Dim lastPart = patternParts.Last.Value
+                If lastPart.matcher Is Nothing Then lastPart.matcher = Function(rr) rr.Length
+
+                '
+                ' 3. Attempt to match the existing filename against the pattern
+                Dim basefn = IO.Path.GetFileNameWithoutExtension(fileToDo.fn)
+                Dim matchremainder = basefn
+                Dim matchParts As New LinkedList(Of PatternPart)(patternParts)
+                While matchParts.Count > 0 AndAlso matchremainder.Length > 0
+                    Dim matchPart As PatternPart = matchParts.First.Value
+                    Dim matchLength = matchPart.matcher(matchremainder)
+                    If matchLength = -1 Then Exit While
+                    matchParts.RemoveFirst()
+                    If matchPart.pattern = "%{fn}" Then basefn = matchremainder.Substring(0, matchLength)
+                    matchremainder = matchremainder.Substring(matchLength)
+                End While
+
+                If matchremainder.Length = 0 AndAlso matchParts.Count = 2 AndAlso matchParts(0).pattern = " - " AndAlso matchParts(1).pattern = "%{place}" Then
+                    ' hack if you had pattern like "%{year} - %{fn} - %{place}" so
+                    ' it will match a filename like "2012 - file.jpg" which lacks a place
+                    matchParts.Clear()
+                End If
+
+                If matchParts.Count <> 0 OrElse matchremainder.Length > 0 Then
+                    ' failed to do a complete match
+                    basefn = IO.Path.GetFileNameWithoutExtension(fileToDo.fn)
+                End If
+                '
+                ' 4. Figure out the new filename
+                Dim newfn = IO.Path.GetDirectoryName(fileToDo.fn) & "\"
+                For Each patternPart In patternParts
+                    newfn &= patternPart.generator(basefn, fileToDo.localTime, fileToDo.hasGpsResult)
+                Next
+                If patternParts.Count > 2 AndAlso patternParts.Last.Value.pattern = "%{place}" AndAlso patternParts.Last.Previous.Value.pattern = " - " AndAlso String.IsNullOrEmpty(fileToDo.hasGpsResult) Then
+                    If newfn.EndsWith(" - ") Then newfn = newfn.Substring(0, newfn.Length - 3)
+                End If
+                newfn &= patternExt
+                If fileToDo.fn <> newfn Then
+                   If IO.File.Exists(newfn) Then Console.WriteLine("Already exists - " & IO.Path.GetFileName(newfn)) : Continue While
+                    Console.WriteLine(IO.Path.GetFileName(newfn))
+                    IO.File.Move(fileToDo.fn, newfn)
+                End If
+            }
+
+        }
+
     }
 
     static HttpClient http = new HttpClient();
@@ -103,7 +332,7 @@ static partial class Program
         Console.Write(".");
         var statusResp = http.PostAsync(queryUri, new StringContent(queryData)).GetAwaiter().GetResult();
         if (!statusResp.IsSuccessStatusCode) { Console.WriteLine($"ERROR {statusResp.StatusCode} - {statusResp.ReasonPhrase}"); return; }
-        if (string.IsNullOrEmpty(statusResp.Headers.Location?.ToString()) { Console.WriteLine(" ERROR - no location"); return; }
+        if (string.IsNullOrEmpty(statusResp.Headers.Location?.ToString())) { Console.WriteLine(" ERROR - no location"); return; }
         var statusUri = statusResp.Headers.Location.ToString();
         Console.Write(".");
 
@@ -158,7 +387,7 @@ static partial class Program
     delegate int MatchFunction(string remainder); // -1 for no-match, otherwise is the number of characters gobbled up
     delegate bool UpdateTimeFunc(Stream stream, TimeSpan off);
 
-    readonly Tuple<DateTimeKind?, UpdateTimeFunc, GpsCoordinates> EmptyResult = new Tuple<DateTimeKind?, UpdateTimeFunc, GpsCoordinates>(null, () => false, null);
+    static readonly Tuple<DateTimeKind?, UpdateTimeFunc, GpsCoordinates> EmptyResult = new Tuple<DateTimeKind?, UpdateTimeFunc, GpsCoordinates>(null, (s,t) => false, null);
 
     class GpsCoordinates
     {
@@ -188,6 +417,21 @@ static partial class Program
         public GpsCoordinates gpsCoordinates;
 
         public string hasGpsResult;
+    }
+
+
+    static Tuple<DateTimeKind?, UpdateTimeFunc, GpsCoordinates> MetadataTimeAndGps(string fn)
+    {
+        using (var file = new FileStream(fn, FileMode.Open, FileAccess.Read))
+        {
+            file.Seek(0, SeekOrigin.End); var fend = file.Position;
+            if (fend < 8) return EmptyResult;
+            file.Seek(0, SeekOrigin.Begin);
+            ushort h1 = file.Read2byte(), h2 = file.Read2byte(); var h3 = file.Read4byte();
+            if (h1 == 0xFFD8) return ExifTime(file, 0, fend); // jpeg header
+            if (h3 == 0x66747970) return Mp4Time(file, 0, fend); // "ftyp" prefix of mp4, mov
+            return null;
+        }
     }
 
 
@@ -398,164 +642,179 @@ static partial class Program
     }
 
 
-    Function Mp4Time(file As IO.Stream, start As Long, fend As Long) As Tuple(Of DateTimeKind?, UpdateTimeFunc, GpsCoordinates)
-        ' The file is made up of a sequence of boxes, with a standard way to find size and FourCC "kind" of each.
-        ' Some box kinds contain a kind-specific blob of binary data. Other box kinds contain a sequence
-        ' of sub-boxes. You need to look up the specs for each kind to know whether it has a blob or sub-boxes.
-        ' We look for a top-level box of kind "moov", which contains sub-boxes, and then we look for its sub-box
-        ' of kind "mvhd", which contains a binary blob. This is where Creation/ModificationTime are stored.
-        Dim pos = start, payloadStart = 0L, payloadEnd = 0L, boxKind = ""
-        '
-        While Mp4ReadNextBoxInfo(file, pos, fend, boxKind, payloadStart, payloadEnd) AndAlso boxKind<> "ftyp" : pos = payloadEnd
-        End While
-        If boxKind <> "ftyp" Then Return EmptyResult
-        Dim majorBrandBuf(3) As Byte
-        file.Seek(payloadStart, SeekOrigin.Begin) : file.Read(majorBrandBuf, 0, 4)
-        Dim majorBrand = Text.Encoding.ASCII.GetString(majorBrandBuf)
-        '
-        pos = start
-        While Mp4ReadNextBoxInfo(file, pos, fend, boxKind, payloadStart, payloadEnd) AndAlso boxKind<> "moov" : pos = payloadEnd : End While
-        If boxKind <> "moov" Then Return EmptyResult
-        Dim moovStart = payloadStart, moovEnd = payloadEnd
-        '
-        pos = moovStart : fend = moovEnd
-        While Mp4ReadNextBoxInfo(file, pos, fend, boxKind, payloadStart, payloadEnd) AndAlso boxKind<> "mvhd" : pos = payloadEnd : End While
-        If boxKind <> "mvhd" Then Return EmptyResult
-        Dim mvhdStart = payloadStart, mvhdEnd = payloadEnd
-        '
-        pos = moovStart : fend = moovEnd
-        Dim cdayStart = 0L, cdayEnd = 0L
-        Dim cnthStart = 0L, cnthEnd = 0L
-        While Mp4ReadNextBoxInfo(file, pos, fend, boxKind, payloadStart, payloadEnd) AndAlso boxKind<> "udta" : pos = payloadEnd : End While
-        If boxKind = "udta" Then
-            Dim udtaStart = payloadStart, udtaEnd = payloadEnd
-            '
-            pos = udtaStart : fend = udtaEnd
-            While Mp4ReadNextBoxInfo(file, pos, fend, boxKind, payloadStart, payloadEnd) AndAlso boxKind<> "©day" : pos = payloadEnd : End While
-            If boxKind = "©day" Then cdayStart = payloadStart : cdayEnd = payloadEnd
-            '
-            pos = udtaStart : fend = udtaEnd
-            While Mp4ReadNextBoxInfo(file, pos, fend, boxKind, payloadStart, payloadEnd) AndAlso boxKind<> "CNTH" : pos = payloadEnd : End While
-            If boxKind = "CNTH" Then cnthStart = payloadStart : cnthEnd = payloadEnd
-        End If
-
-        ' The "mvhd" binary blob consists of 1byte (version, either 0 or 1), 3bytes (flags),
-        ' and then either 4bytes (creation), 4bytes (modification)
-        ' or 8bytes (creation), 8bytes (modification)
-        ' If version=0 then it's the former, otherwise it's the later.
-        ' In both cases "creation" and "modification" are big-endian number of seconds since 1st Jan 1904 UTC
-        If mvhdEnd - mvhdStart< 20 Then Return EmptyResult
-        file.Seek(mvhdStart + 0, SeekOrigin.Begin) : Dim version = file.ReadByte(), numBytes = If(version = 0, 4, 8)
-        file.Seek(mvhdStart + 4, SeekOrigin.Begin)
-        Dim creationFix1970 = False, modificationFix1970 = False
-        Dim creationTime = file.ReadDate(numBytes, creationFix1970)
-        Dim modificationTime = file.ReadDate(numBytes, modificationFix1970)
-        ' COMPATIBILITY-BUG: The spec says that these times are in UTC.
-        ' However, my Sony Cybershot merely gives them in unspecified time (i.e. local time but without specifying the timezone)
-        ' Indeed its UI doesn't even let you say what the current UTC time is.
-        ' I also noticed that my Sony Cybershot gives MajorBrand="MSNV", which isn't used by my iPhone or Canon or WP8.
-        ' I'm going to guess that all "MSNV" files come from Sony, and all of them have the bug.
-        Dim makeMvhdTime = Function(dt As DateTime) As DateTimeKind
-                               If majorBrand = "MSNV" Then Return DateTimeKind.Unspecified(dt)
-                               Return DateTimeKind.Utc(dt)
-                           End Function
-
-        ' The "©day" binary blob consists of 2byte (string-length, big-endian), 2bytes (language-code), string
-        Dim dayTime As DateTimeKind? = Nothing
-        Dim cdayStringLen = 0, cdayString = ""
-        If cdayStart<> 0 AndAlso cdayEnd - cdayStart > 4 Then
-            file.Seek(cdayStart + 0, SeekOrigin.Begin)
-            cdayStringLen = file.Read2byte()
-            If cdayStart + 4 + cdayStringLen <= cdayEnd Then
-                file.Seek(cdayStart + 4, SeekOrigin.Begin)
-                Dim buf = New Byte(cdayStringLen - 1) { }
-    file.Read(buf, 0, cdayStringLen)
-                cdayString = System.Text.Encoding.ASCII.GetString(buf)
-                Dim d As DateTimeOffset : If DateTimeOffset.TryParse(cdayString, d) Then dayTime = DateTimeKind.Local(d)
-            End If
-        End If
-
-        ' The "CNTH" binary blob consists of 8bytes of unknown, followed by EXIF data
-        Dim cnthTime As DateTimeKind? = Nothing, cnthLambda As UpdateTimeFunc = Nothing
-        If cnthStart<> 0 AndAlso cnthEnd - cnthStart > 16 Then
-           Dim exif_ft = ExifTime(file, cnthStart + 8, cnthEnd)
-            cnthTime = exif_ft.Item1 : cnthLambda = exif_ft.Item2
-        End If
-
-        Dim winnerTime As DateTimeKind? = Nothing
-        If dayTime.HasValue Then
-            Debug.Assert(dayTime.Value.dt.Kind = System.DateTimeKind.Local)
-            winnerTime = dayTime
-            ' prefer this best of all because it knows local time and timezone
-        ElseIf cnthTime.HasValue Then
-            Debug.Assert(cnthTime.Value.dt.Kind = System.DateTimeKind.Unspecified)
-            winnerTime = cnthTime
-            ' this is second-best because it knows local time, just not timezone
-        Else
-            ' Otherwise, we'll make do with a UTC time, where we don't know local-time when the pic was taken, nor timezone
-            If creationTime.HasValue AndAlso modificationTime.HasValue Then
-                winnerTime = makeMvhdTime(If(creationTime < modificationTime, creationTime.Value, modificationTime.Value))
-            ElseIf creationTime.HasValue Then
-                winnerTime = makeMvhdTime(creationTime.Value)
-            ElseIf modificationTime.HasValue Then
-                winnerTime = makeMvhdTime(modificationTime.Value)
-            End If
-        End If
-
-        Dim lambda As UpdateTimeFunc =
-            Function(file2, offset)
-                If creationTime.HasValue Then
-                    Dim dd = creationTime.Value + offset
-                    file2.Seek(mvhdStart + 4, SeekOrigin.Begin)
-                    file2.WriteDate(numBytes, dd, creationFix1970)
-                End If
-                If modificationTime.HasValue Then
-                    Dim dd = modificationTime.Value + offset
-                    file2.Seek(mvhdStart + 4 + numBytes, SeekOrigin.Begin)
-                    file2.WriteDate(numBytes, dd, modificationFix1970)
-                End If
-                If Not String.IsNullOrWhiteSpace(cdayString) Then
-                    Dim dd As DateTimeOffset
-                    If DateTimeOffset.TryParse(cdayString, dd) Then
-                        dd = dd + offset
-                        Dim str2 = dd.ToString("yyyy-MM-ddTHH:mm:sszz00")
-                        Dim buf2 = Text.Encoding.ASCII.GetBytes(str2)
-                        If buf2.Length = cdayStringLen Then
-                            file2.Seek(cdayStart + 4, SeekOrigin.Begin)
-                            file2.Write(buf2, 0, buf2.Length)
-                        End If
-                    End If
-                End If
-                If cnthLambda IsNot Nothing Then cnthLambda(file2, offset)
-                Return True
-            End Function
-
-        Return Tuple.Create(winnerTime, lambda, CType(Nothing, GpsCoordinates))
-    End Function
-
-
-    static bool Mp4ReadNextBoxInfo(Stream f, long pos, long fend, ref string boxKind, ref long payloadStart, ref long payloadEnd)
+    static Tuple<DateTimeKind?, UpdateTimeFunc, GpsCoordinates> Mp4Time(Stream file, long start, long fend)
     {
-        boxKind = "" : payloadStart = 0 : payloadEnd = 0
-        If pos +8 > fend Then Return False
-       Dim b(3) As Byte
-        f.Seek(pos, SeekOrigin.Begin)
-        f.Read(b, 0, 4) : If BitConverter.IsLittleEndian Then Array.Reverse(b)
-        Dim size = BitConverter.ToUInt32(b, 0)
-        f.Read(b, 0, 4)
-        Dim kind = ChrW(b(0)) & ChrW(b(1)) & ChrW(b(2)) & ChrW(b(3))
-        If size<> 1 Then
-            If pos + size > fend Then Return False
-            boxKind = kind : payloadStart = pos + 8 : payloadEnd = payloadStart + size - 8 : Return True
-        End If
-        If size = 1 AndAlso pos +16 <= fend Then
-           ReDim b(7)
-            f.Read(b, 0, 8) : If BitConverter.IsLittleEndian Then Array.Reverse(b)
-            Dim size2 = CLng(BitConverter.ToUInt64(b, 0))
-            If pos +size2 > fend Then Return False
-           boxKind = kind : payloadStart = pos + 16 : payloadEnd = payloadStart + size2 - 16 : Return True
-        End If
-        Return False
+        // The file is made up of a sequence of boxes, with a standard way to find size and FourCC "kind" of each.
+        // Some box kinds contain a kind-specific blob of binary data. Other box kinds contain a sequence
+        // of sub-boxes. You need to look up the specs for each kind to know whether it has a blob or sub-boxes.
+        // We look for a top-level box of kind "moov", which contains sub-boxes, and then we look for its sub-box
+        // of kind "mvhd", which contains a binary blob. This is where Creation/ModificationTime are stored.
+        long pos = start, payloadStart = 0, payloadEnd = 0; var boxKind = "";
+        //
+        while (Mp4ReadNextBoxInfo(file, pos, fend, out boxKind, out payloadStart, out payloadEnd) && boxKind != "ftyp")
+        {
+            pos = payloadEnd;
+        }
+        if (boxKind != "ftyp") return EmptyResult;
+        var majorBrandBuf = new byte[4];
+        file.Seek(payloadStart, SeekOrigin.Begin); file.Read(majorBrandBuf, 0, 4);
+        var majorBrand = Encoding.ASCII.GetString(majorBrandBuf);
+        //
+        pos = start;
+        while (Mp4ReadNextBoxInfo(file, pos, fend, out boxKind, out payloadStart, out payloadEnd) && boxKind != "moov")  pos = payloadEnd;
+        if (boxKind != "moov") return EmptyResult;
+        long moovStart = payloadStart, moovEnd = payloadEnd;
+        //
+        pos = moovStart; fend = moovEnd;
+        while (Mp4ReadNextBoxInfo(file, pos, fend, out boxKind, out payloadStart, out payloadEnd) && boxKind != "mvhd") pos = payloadEnd;
+        if (boxKind != "mvhd") return EmptyResult;
+        long mvhdStart = payloadStart, mvhdEnd = payloadEnd;
+        //
+        pos = moovStart; fend = moovEnd;
+        long cdayStart = 0, cdayEnd = 0;
+        long cnthStart = 0, cnthEnd = 0;
+        while (Mp4ReadNextBoxInfo(file, pos, fend, out boxKind, out payloadStart, out payloadEnd) && boxKind != "udta") pos = payloadEnd;
+        if (boxKind == "udta")
+        {
+            long udtaStart = payloadStart, udtaEnd = payloadEnd;
+            //
+            pos = udtaStart; fend = udtaEnd;
+            while (Mp4ReadNextBoxInfo(file, pos, fend, out boxKind, out payloadStart, out payloadEnd) && boxKind != "©day") pos = payloadEnd;
+            if (boxKind == "©day") { cdayStart = payloadStart; cdayEnd = payloadEnd; }
+            //
+            pos = udtaStart; fend = udtaEnd;
+            while (Mp4ReadNextBoxInfo(file, pos, fend, out boxKind, out payloadStart, out payloadEnd) && boxKind != "CNTH") pos = payloadEnd;
+            if (boxKind == "CNTH") { cnthStart = payloadStart; cnthEnd = payloadEnd; }
+        }
+
+        // The "mvhd" binary blob consists of 1byte (version, either 0 or 1), 3bytes (flags),
+        // and then either 4bytes (creation), 4bytes (modification)
+        // or 8bytes (creation), 8bytes (modification)
+        // If version=0 then it's the former, otherwise it's the later.
+        // In both cases "creation" and "modification" are big-endian number of seconds since 1st Jan 1904 UTC
+        if (mvhdEnd - mvhdStart < 20) return EmptyResult;
+        file.Seek(mvhdStart + 0, SeekOrigin.Begin); int version = file.ReadByte(), numBytes = version == 0 ? 4 : 8;
+        file.Seek(mvhdStart + 4, SeekOrigin.Begin);
+        bool creationFix1970 = false, modificationFix1970 = false;
+        var creationTime = file.ReadDate(numBytes, out creationFix1970);
+        var modificationTime = file.ReadDate(numBytes, out modificationFix1970);
+        // COMPATIBILITY-BUG: The spec says that these times are in UTC.
+        // However, my Sony Cybershot merely gives them in unspecified time (i.e. local time but without specifying the timezone)
+        // Indeed its UI doesn't even let you say what the current UTC time is.
+        // I also noticed that my Sony Cybershot gives MajorBrand="MSNV", which isn't used by my iPhone or Canon or WP8.
+        // I'm going to guess that all "MSNV" files come from Sony, and all of them have the bug.
+        Func<DateTime, DateTimeKind> makeMvhdTime = (dt) =>
+         {
+             if (majorBrand == "MSNV") return DateTimeKind.Unspecified(dt);
+             return DateTimeKind.Utc(dt);
+         };
+
+        // The "©day" binary blob consists of 2byte (string-length, big-endian), 2bytes (language-code), string
+        DateTimeKind? dayTime = null;
+        var cdayStringLen = 0; var cdayString = "";
+        if (cdayStart != 0 && cdayEnd - cdayStart > 4)
+        {
+            file.Seek(cdayStart + 0, SeekOrigin.Begin);
+            cdayStringLen = file.Read2byte();
+            if (cdayStart + 4 + cdayStringLen <= cdayEnd)
+            {
+                file.Seek(cdayStart + 4, SeekOrigin.Begin);
+                var buf = new byte[cdayStringLen];
+                file.Read(buf, 0, cdayStringLen);
+                cdayString = Encoding.ASCII.GetString(buf);
+                DateTimeOffset d; if (DateTimeOffset.TryParse(cdayString, out d)) dayTime = DateTimeKind.Local(d);
+            }
+        }
+
+        // The "CNTH" binary blob consists of 8bytes of unknown, followed by EXIF data
+        DateTimeKind? cnthTime = null; UpdateTimeFunc cnthLambda = null; GpsCoordinates cnthGps = null;
+        if (cnthStart != 0 && cnthEnd - cnthStart > 16)
+        {
+            var exif_ft = ExifTime(file, cnthStart + 8, cnthEnd);
+            cnthTime = exif_ft.Item1; cnthLambda = exif_ft.Item2; cnthGps = exif_ft.Item3;
+        }
+
+        DateTimeKind? winnerTime = null;
+        if (dayTime.HasValue)
+        {
+            Debug.Assert(dayTime.Value.dt.Kind == System.DateTimeKind.Local);
+            winnerTime = dayTime;
+            // prefer this best of all because it knows local time and timezone
+        }
+        else if (cnthTime.HasValue)
+        {
+            Debug.Assert(cnthTime.Value.dt.Kind == System.DateTimeKind.Unspecified);
+            winnerTime = cnthTime;
+            // this is second-best because it knows local time, just not timezone
+        }
+        else
+        {
+            // Otherwise, we'll make do with a UTC time, where we don't know local-time when the pic was taken, nor timezone
+            if (creationTime.HasValue && modificationTime.HasValue) winnerTime = makeMvhdTime(creationTime < modificationTime ? creationTime.Value : modificationTime.Value);
+            else if (creationTime.HasValue) winnerTime = makeMvhdTime(creationTime.Value);
+            else if (modificationTime.HasValue) winnerTime = makeMvhdTime(modificationTime.Value);
+        }
+
+        UpdateTimeFunc lambda = (file2, offset) =>
+        {
+            if (creationTime.HasValue)
+            {
+                var dd = creationTime.Value + offset;
+                file2.Seek(mvhdStart + 4, SeekOrigin.Begin);
+                file2.WriteDate(numBytes, dd, creationFix1970);
+            }
+            if (modificationTime.HasValue)
+            {
+                var dd = modificationTime.Value + offset;
+                file2.Seek(mvhdStart + 4 + numBytes, SeekOrigin.Begin);
+                file2.WriteDate(numBytes, dd, modificationFix1970);
+            }
+            if (!string.IsNullOrWhiteSpace(cdayString))
+            {
+                DateTimeOffset dd; if (DateTimeOffset.TryParse(cdayString, out dd))
+                {
+                    dd = dd + offset;
+                    var str2 = dd.ToString("yyyy-MM-ddTHH:mm:sszz00");
+                    var buf2 = Encoding.ASCII.GetBytes(str2);
+                    if (buf2.Length == cdayStringLen)
+                    {
+                        file2.Seek(cdayStart + 4, SeekOrigin.Begin);
+                        file2.Write(buf2, 0, buf2.Length);
+                    }
+                }
+            }
+            if (cnthLambda != null) cnthLambda(file2, offset);
+            return true;
+        };
+
+        return Tuple.Create(winnerTime, lambda, cnthGps);
+    }
+
+
+    static bool Mp4ReadNextBoxInfo(Stream f, long pos, long fend, out string boxKind, out long payloadStart, out long payloadEnd)
+    {
+        boxKind = ""; payloadStart = 0; payloadEnd = 0;
+        if (pos + 8 > fend) return false;
+        var b = new byte[4];
+        f.Seek(pos, SeekOrigin.Begin);
+        f.Read(b, 0, 4); if (BitConverter.IsLittleEndian) Array.Reverse(b);
+        var size = BitConverter.ToUInt32(b, 0);
+        f.Read(b, 0, 4);
+        var kind = $"{(char)b[0]}{(char)b[1]}{(char)b[2]}{(char)b[3]}";
+        if (size != 1)
+        {
+            if (pos + size > fend) return false;
+            boxKind = kind; payloadStart = pos + 8; payloadEnd = payloadStart + size - 8; return true;
+        }
+        if (size == 1 && pos + 16 <= fend)
+        {
+            b = new byte[8];
+            f.Read(b, 0, 8); if (BitConverter.IsLittleEndian) Array.Reverse(b);
+            var size2 = (long)BitConverter.ToUInt64(b, 0);
+            if (pos + size2 > fend) return false;
+            boxKind = kind; payloadStart = pos + 16; payloadEnd = payloadStart + size2 - 16; return true;
+        }
+        return false;
     }
 
 
@@ -584,8 +843,10 @@ static partial class Program
         return BitConverter.ToUInt32(b, 0);
     }
 
-    static DateTime? ReadDate(this Stream f, int numBytes, ref bool fixed1970)
+    static DateTime? ReadDate(this Stream f, int numBytes, out bool fixed1970)
     {
+        fixed1970 = false;
+
         // COMPATIBILITY-BUG: The spec says that these are expressed in seconds since 1904.
         // But my brother's Android phone picks them in seconds since 1970.
         // I'm going to guess that all dates before 1970 should be 66 years in the future
@@ -620,14 +881,14 @@ static partial class Program
         if (d.Kind != System.DateTimeKind.Utc) throw new ArgumentException("Can only write UTC dates");
         if (numBytes == 4)
         {
-            var secs = (uint)(fix1970 ? d - TZERO_1970_UTC : d - TZERO_1904_UTC).TotalSeconds);
+            var secs = (uint)(fix1970 ? d - TZERO_1970_UTC : d - TZERO_1904_UTC).TotalSeconds;
             var b = BitConverter.GetBytes(secs);
             if (BitConverter.IsLittleEndian) Array.Reverse(b);
             f.Write(b, 0, 4);
         }
         else if (numBytes == 8)
         {
-            var secs = (ulong)(fix1970 ? d - TZERO_1970_UTC : d - TZERO_1904_UTC).TotalSeconds);
+            var secs = (ulong)(fix1970 ? d - TZERO_1970_UTC : d - TZERO_1904_UTC).TotalSeconds;
             var b = BitConverter.GetBytes(secs);
             if (BitConverter.IsLittleEndian) Array.Reverse(b);
             f.Write(b, 0, 8);
@@ -698,236 +959,6 @@ Dim ft = FilestampTime($"test\{fn}")?.Item1
             Console.WriteLine($"{fn}{vbCrLf}    ft={ft}{vbCrLf}    mt={mt}")
         Next
     End Sub
-
-    Sub Main(args As String())
-
-
-        While filesToDo.Count > 0 OrElse gpsToDo.Count > 0
-            If filesToDo.Count = 0 Then DoGps(gpsToDo, filesToDo)
-            Dim fileToDo = filesToDo.Dequeue()
-
-            If Not fileToDo.hasInitialScan Then
-                fileToDo.hasInitialScan = True
-                Dim mtt = MetadataTimeAndGps(fileToDo.fn)
-                Dim ftt = FilestampTime(fileToDo.fn)
-                If mtt Is Nothing Then Console.WriteLine("Not an image/video - ""{0}""", IO.Path.GetFileName(fileToDo.fn)) : Continue While
-                Dim mt = mtt.Item1, ft = ftt.Item1
-                If mt.HasValue Then
-                    fileToDo.setter = mtt.Item2
-                    fileToDo.gpsCoordinates = mtt.Item3
-                    If mt.Value.dt.Kind = System.DateTimeKind.Unspecified OrElse mt.Value.dt.Kind = System.DateTimeKind.Local Then
-                        ' If dt.kind=Unspecified (e.g. EXIF, Sony), then the time is by assumption already local from when the picture was shot
-                        ' If dt.kind=Local (e.g. iPhone-MOV), then the time is local, and also indicates its timezone offset
-                        fileToDo.localTime = mt.Value.dt
-                    ElseIf mt.Value.dt.Kind = System.DateTimeKind.Utc Then
-                        ' If dt.Kind=UTC (e.g. Android), then time is in UTC, and we don't know how to read timezone.
-                        fileToDo.localTime = mt.Value.dt.ToLocalTime() ' Best we can do is guess the timezone of the computer
-                    End If
-                Else
-                    fileToDo.setter = ftt.Item2
-                    If ft.dt.Kind = System.DateTimeKind.Unspecified Then
-                        ' e.g. Windows Phone when we got the date from the filename
-                        fileToDo.localTime = ft.dt
-                    ElseIf ft.dt.Kind = System.DateTimeKind.Utc Then
-                        ' e.g. all other files where we got the date from the filestamp
-                        fileToDo.localTime = ft.dt.ToLocalTime() ' the best we can do is guess that the photo was taken in the timezone as this computer now
-                    Else
-                        Throw New Exception("Expected filetimes to be in UTC")
-                    End If
-                End If
-            End If
-
-            ' The only thing that requires GPS is if (1) we're doing a rename, (2) the
-            ' pattern includes place, (3) the file actually has a GPS signature
-            If cmdPattern.Contains("%{place}") AndAlso fileToDo.gpsCoordinates IsNot Nothing AndAlso fileToDo.hasGpsResult Is Nothing AndAlso Not String.IsNullOrEmpty(BingMapsKey.BingMapsKey) Then
-                gpsNextRequestId += 1
-                gpsToDo.Add(gpsNextRequestId, fileToDo)
-                If gpsToDo.Count >= 50 Then DoGps(gpsToDo, filesToDo)
-                Continue While
-            End If
-
-            ' Otherwise, by assumption here, either we have GPS result or we don't need it
-
-            If cmdPattern = "" AndAlso Not cmdOffset.HasValue Then
-                Console.WriteLine("""{0}"": {1:yyyy.MM.dd - HH.mm.ss}", IO.Path.GetFileName(fileToDo.fn), fileToDo.localTime)
-            End If
-
-
-            If cmdOffset.HasValue Then
-                Using file = New IO.FileStream(fileToDo.fn, IO.FileMode.Open, IO.FileAccess.ReadWrite)
-                    Dim prevTime = fileToDo.localTime
-                    Dim r = fileToDo.setter(file, cmdOffset.Value)
-                    If r Then
-                        fileToDo.localTime += cmdOffset.Value
-                        If cmdPattern = "" Then Console.WriteLine("""{0}"": {1:yyyy.MM.dd - HH.mm.ss}, corrected from {2:yyyy.MM.dd - HH.mm.ss}", IO.Path.GetFileName(fileToDo.fn), fileToDo.localTime, prevTime)
-                    End If
-                End Using
-            End If
-
-
-            If cmdPattern <> "" Then
-                ' Filename heuristics:
-                ' (1) If the user omitted an extension from the rename string, then we re-use the one that was given to us
-                ' (2) If the filename already matched our datetime format, then we figure out what was the base filename
-                If Not cmdPattern.Contains("%{fn}") Then Console.WriteLine("Please include %{fn} in the pattern") : Return
-                If cmdPattern.Contains("\") Then Console.WriteLine("Folders not allowed in pattern") : Return
-                If cmdPattern.Split({"%{fn}"}, StringSplitOptions.None).Length<> 2 Then Console.WriteLine("Please include %{fn} only once in the pattern") : Return
-                '
-                ' 1. Extract out the extension
-                Dim pattern = cmdPattern
-                Dim patternExt As String = Nothing
-                For Each potentialExt In {".jpg", ".mp4", ".mov", ".jpeg"}
-If Not pattern.ToLower.EndsWith(potentialExt) Then Continue For
-patternExt = pattern.Substring(pattern.Length - potentialExt.Length)
-                    pattern = pattern.Substring(0, pattern.Length - potentialExt.Length)
-                    Exit For
-                Next
-                If patternExt Is Nothing Then patternExt = IO.Path.GetExtension(fileToDo.fn)
-                '
-                ' 2. Parse the pattern-string into its constitutent parts
-                Dim patternSplit0 = pattern.Split({"%"c})
-                Dim patternSplit As New List(Of String)
-                If patternSplit0(0).Length > 0 Then patternSplit.Add(patternSplit0(0))
-                For i = 1 To patternSplit0.Length - 1
-                    Dim s = "%" & patternSplit0(i)
-                    If Not s.StartsWith("%{") Then Console.WriteLine("ERROR: wrong pattern") : Return
-                    Dim ib = s.IndexOf("}")
-                    patternSplit.Add(s.Substring(0, ib + 1))
-                    If ib<> s.Length - 1 Then patternSplit.Add(s.Substring(ib + 1))
-                Next
-                Dim patternParts As New LinkedList(Of PatternPart)
-
-                For Each rsplit In patternSplit
-                    Dim part As New PatternPart
-                    part.pattern = rsplit
-
-                    If Not rsplit.StartsWith("%") Then
-                        part.generator = Function() rsplit
-                        part.matcher = Function(rr)
-                                           If rr.Length<rsplit.Length Then Return -1
-                                           If rr.Substring(0, rsplit.Length) = rsplit Then Return rsplit.Length
-                                           Return -1
-                                       End Function
-                        Dim prevPart = patternParts.LastOrDefault
-                        If prevPart IsNot Nothing AndAlso prevPart.matcher Is Nothing Then
-                            prevPart.matcher = Function(rr)
-                                                   Dim i = rr.IndexOf(rsplit)
-                                                   If i = -1 Then Return rr.Length
-                                                   Return i
-                                               End Function
-                        End If
-                        patternParts.AddLast(part)
-                        Continue For
-                    End If
-
-                    If rsplit.StartsWith("%{fn}") Then
-                        part.generator = Function(fn2, dt2, pl2) fn2
-                        part.matcher = Nothing ' must be filled in by the next part
-                        patternParts.AddLast(part)
-                        Continue For
-                    End If
-
-                    If rsplit.StartsWith("%{place}") Then
-                        part.generator = Function(fn2, dt2, pl2) pl2
-                        part.matcher = Nothing ' must be filled in by the next part
-                        patternParts.AddLast(part)
-                        Continue For
-                    End If
-
-                    Dim escapes = {"%{datetime}", "yyyy.MM.dd - HH.mm.ss", "####.##.## - ##.##.##",
-                                   "%{date}", "yyyy.MM.dd", "####.##.##",
-                                   "%{time}", "HH.mm.ss", "##.##.##",
-                                   "%{year}", "yyyy", "####",
-                                   "%{month}", "MM", "##",
-                                   "%{day}", "dd", "##",
-                                   "%{hour}", "HH", "##",
-                                   "%{minute}", "mm", "##",
-                                   "%{second}", "ss", "##"}
-                    Dim escape = "", fmt = "", islike = ""
-                    For i = 0 To escapes.Length - 1 Step 3
-                        If Not rsplit.StartsWith(escapes(i)) Then Continue For
-                        escape = escapes(i)
-                        fmt = escapes(i + 1)
-                        islike = escapes(i + 2)
-                        Exit For
-                    Next
-                    If escape = "" Then Console.WriteLine("Unrecognized {0}", rsplit) : Return
-                    part.generator = Function(fn2, dt2, pl2) dt2.ToString(fmt)
-                    part.matcher = Function(rr)
-                                       If rr.Length<islike.Length Then Return -1
-                                       If rr.Substring(0, islike.Length) Like islike Then Return islike.Length
-                                       Return -1
-                                   End Function
-                    patternParts.AddLast(part)
-                Next
-
-                ' The last part, if it was %{fn} or %{place} will match
-                ' up to the remainder of the original filename
-                Dim lastPart = patternParts.Last.Value
-                If lastPart.matcher Is Nothing Then lastPart.matcher = Function(rr) rr.Length
-
-                '
-                ' 3. Attempt to match the existing filename against the pattern
-                Dim basefn = IO.Path.GetFileNameWithoutExtension(fileToDo.fn)
-                Dim matchremainder = basefn
-                Dim matchParts As New LinkedList(Of PatternPart)(patternParts)
-                While matchParts.Count > 0 AndAlso matchremainder.Length > 0
-                    Dim matchPart As PatternPart = matchParts.First.Value
-                    Dim matchLength = matchPart.matcher(matchremainder)
-                    If matchLength = -1 Then Exit While
-                    matchParts.RemoveFirst()
-                    If matchPart.pattern = "%{fn}" Then basefn = matchremainder.Substring(0, matchLength)
-                    matchremainder = matchremainder.Substring(matchLength)
-                End While
-
-                If matchremainder.Length = 0 AndAlso matchParts.Count = 2 AndAlso matchParts(0).pattern = " - " AndAlso matchParts(1).pattern = "%{place}" Then
-                    ' hack if you had pattern like "%{year} - %{fn} - %{place}" so
-                    ' it will match a filename like "2012 - file.jpg" which lacks a place
-                    matchParts.Clear()
-                End If
-
-                If matchParts.Count<> 0 OrElse matchremainder.Length > 0 Then
-                    ' failed to do a complete match
-                    basefn = IO.Path.GetFileNameWithoutExtension(fileToDo.fn)
-                End If
-                '
-                ' 4. Figure out the new filename
-                Dim newfn = IO.Path.GetDirectoryName(fileToDo.fn) & "\"
-                For Each patternPart In patternParts
-                    newfn &= patternPart.generator(basefn, fileToDo.localTime, fileToDo.hasGpsResult)
-                Next
-                If patternParts.Count > 2 AndAlso patternParts.Last.Value.pattern = "%{place}" AndAlso patternParts.Last.Previous.Value.pattern = " - " AndAlso String.IsNullOrEmpty(fileToDo.hasGpsResult) Then
-                    If newfn.EndsWith(" - ") Then newfn = newfn.Substring(0, newfn.Length - 3)
-                End If
-                newfn &= patternExt
-                If fileToDo.fn<> newfn Then
-                   If IO.File.Exists(newfn) Then Console.WriteLine("Already exists - " & IO.Path.GetFileName(newfn)) : Continue While
-                    Console.WriteLine(IO.Path.GetFileName(newfn))
-                    IO.File.Move(fileToDo.fn, newfn)
-                End If
-            End If
-
-        End While
-    End Sub
-
-
-
-
-
-
-
-    Function MetadataTimeAndGps(fn As String) As Tuple(Of DateTimeKind?, UpdateTimeFunc, GpsCoordinates)
-        Using file As New IO.FileStream(fn, IO.FileMode.Open, IO.FileAccess.Read)
-            file.Seek(0, SeekOrigin.End) : Dim fend = file.Position
-            If fend< 8 Then Return EmptyResult
-            file.Seek(0, SeekOrigin.Begin)
-            Dim h1 = file.Read2byte(), h2 = file.Read2byte(), h3 = file.Read4byte()
-            If h1 = &HFFD8 Then Return ExifTime(file, 0, fend) ' jpeg header
-            If h3 = &H66747970 Then Return Mp4Time(file, 0, fend) ' "ftyp" prefix of mp4, mov
-            Return Nothing
-        End Using
-    End Function
-
 
 
 
