@@ -9,6 +9,10 @@ using System.Xml.Linq;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 
+// TODO:
+// (2) Write a TestGPS function which uses Bing
+// (3) Alter Bing to prefer landmarks if they're nearby
+
 static partial class Program
 {
     static void Test()
@@ -26,74 +30,89 @@ static partial class Program
     static void Main(string[] args)
     {
         if (BingMapsKey == "") Console.WriteLine("THIS VERSION HAS BEEN BUILT WITHOUT GPS SUPPORT");
-        string cmdFn = "", cmdPattern = "", cmdError = ""; TimeSpan? cmdOffset = null;
+
+        string cmdPattern = "", cmdError = ""; TimeSpan? cmdOffset = null;
+        var cmdFns = new List<string>();
         var cmdArgs = new LinkedList<string>(args);
-        // Get the filename
-        if (cmdArgs.Count > 0 && !cmdArgs.First.Value.StartsWith("/")) { cmdFn = cmdArgs.First.Value; cmdArgs.RemoveFirst(); }
-        // Search for further switches
+        //
         while (cmdError == "" && cmdArgs.Count > 0)
         {
-            var cmdSwitch = cmdArgs.First.Value; cmdArgs.RemoveFirst();
-            if (cmdSwitch == "/rename")
+            var cmd = cmdArgs.First.Value; cmdArgs.RemoveFirst();
+            if (cmd == "-rename" || cmd=="/rename")
             {
                 if (cmdPattern != "") { cmdError = "duplicate /rename"; break; }
                 cmdPattern = "%{datetime} - %{fn} - %{place}";
-                if (cmdArgs.Count > 0 && !cmdArgs.First.Value.StartsWith("/")) { cmdPattern = cmdArgs.First.Value; cmdArgs.RemoveFirst(); }
+                if (cmdArgs.Count > 0 && !cmdArgs.First.Value.StartsWith("/") && !cmdArgs.First.Value.StartsWith("-")) { cmdPattern = cmdArgs.First.Value; cmdArgs.RemoveFirst(); }
             }
-            else if (cmdSwitch.StartsWith("/day") || cmdSwitch.StartsWith("/hour") || cmdSwitch.StartsWith("/minute"))
+            else if (cmd.StartsWith("/day") || cmd.StartsWith("/hour") || cmd.StartsWith("/minute")
+                || cmd.StartsWith("-day") || cmd.StartsWith("-hour") || cmd.StartsWith("-minute"))
             {
                 var len = 0; Func<int, TimeSpan> mkts = (n) => default(TimeSpan);
-                if (cmdSwitch.StartsWith("/day")) { len = 4; mkts = (n) => TimeSpan.FromDays(n); }
-                if (cmdSwitch.StartsWith("/hour")) { len = 5; mkts = (n) => TimeSpan.FromHours(n); }
-                if (cmdSwitch.StartsWith("/minute")) { len = 7; mkts = (n) => TimeSpan.FromMinutes(n); }
-                var snum = cmdSwitch.Substring(len);
-                if (!snum.StartsWith("+") && !snum.StartsWith("-")) { cmdError = cmdSwitch; break; }
-                var num = 0; if (!int.TryParse(snum, out num)) { cmdError = cmdSwitch; break; }
+                if (cmd.StartsWith("/day") || cmd.StartsWith("-day")) { len = 4; mkts = (n) => TimeSpan.FromDays(n); }
+                if (cmd.StartsWith("/hour") || cmd.StartsWith("-hour")) { len = 5; mkts = (n) => TimeSpan.FromHours(n); }
+                if (cmd.StartsWith("/minute") || cmd.StartsWith("-minute")) { len = 7; mkts = (n) => TimeSpan.FromMinutes(n); }
+                var snum = cmd.Substring(len);
+                if (!snum.StartsWith("+") && !snum.StartsWith("-")) { cmdError = cmd; break; }
+                var num = 0; if (!int.TryParse(snum, out num)) { cmdError = cmd; break; }
                 cmdOffset = cmdOffset.HasValue ? cmdOffset : new TimeSpan(0);
                 cmdOffset = cmdOffset + mkts(num);
             }
-            else if (cmdSwitch == "/?")
+            else if (cmd == "/?" || cmd=="/help" || cmd=="-help" || cmd=="--help")
             {
-                cmdFn = "";
+                cmdFns.Clear(); break;
+            }
+            else if (cmd.StartsWith("-"))
+            {
+                // unknown option, so error out:
+                cmdError = cmd; break;
+                // We'd also like to error out on unknown options that start with "/",
+                // but can't, because that's a valid filename in unix.
             }
             else
             {
-                cmdError = cmdSwitch; break;
+                if (cmd.Contains("*") || cmd.Contains("?"))
+                {
+                    string globPath = Path.GetDirectoryName(cmd), globMatch = Path.GetFileName(cmd);
+                    if (globPath.Contains("*") || globPath.Contains("?")) { cmdError = "Can't match wildcard directory names"; break; }
+                    if (globPath == "") globPath = Directory.GetCurrentDirectory();
+                    var fns = Directory.GetFiles(globPath, globMatch);
+                    if (fns.Length == 0) Console.WriteLine($"Not found - \"{cmd}\"");
+                    cmdFns.AddRange(fns);
+                }
+                else
+                {
+                    if (File.Exists(cmd)) cmdFns.Add(cmd);
+                    else Console.WriteLine($"Not found - \"{cmd}\"");
+                }
             }
         }
-        if (cmdError != "") { Console.WriteLine("Unrecognized command: {0}", cmdError); return; }
-        if (cmdArgs.Count > 0) { throw new Exception("Failed to parse command line"); }
-        if (cmdFn == "")
+
+
+        Console.WriteLine($"cmdOffset: {cmdOffset}");
+        Console.WriteLine($"cmdPattern: {cmdPattern}");
+        Console.WriteLine("cmdFiles:");
+        foreach (var fn in cmdFns) Console.WriteLine($"   {fn}");
+        return;
+
+        if (cmdFns.Count == 0)
         {
-            Console.WriteLine("FixCameraDate \"a.jpg\" [/rename [\"pattern\"]] [/day+n] [/hour+n] [/minute+n]");
-            Console.WriteLine("  Filename can include * and ? wildcards");
-            Console.WriteLine("  /rename: pattern defaults to \"%{datetime} - %{fn} - %{place}\" and");
-            Console.WriteLine("           can include %{date/time/year/month/day/hour/minute/second/place}");
-            Console.WriteLine("  /day,/hour,/minute: adjust the timestamp; can be + or -");
+            Console.WriteLine(@"FixCameraDate ""a.jpg"" ""b.jpg"" [-rename [""pattern""]] [-day+n] [-hour+n] [-minute+n]");
+            Console.WriteLine(@"  Filename can include * and ? wildcards");
+            Console.WriteLine(@"  -rename: pattern defaults to ""%{datetime} - %{fn} - %{place}"" and");
+            Console.WriteLine(@"           can include %{datetime,fn,date,time,year,month,day,hour,minute,second,place}");
+            Console.WriteLine(@"  -day,-hour,-minute: adjust the timestamp; can be + or -");
             Console.WriteLine();
-            Console.WriteLine("EXAMPLES:");
-            Console.WriteLine("FixCameraDate \"a.jpg\"");
-            Console.WriteLine("FixCameraDate \"*.jpg\" /rename \"%{date} - %{time} - %{fn}.jpg\"");
-            Console.WriteLine("FixCameraDate \"*D*.mov\" /hour+8 /rename");
+            Console.WriteLine(@"EXAMPLES:");
+            Console.WriteLine(@"FixCameraDate ""a.jpg""");
+            Console.WriteLine(@"FixCameraDate ""*.jpg"" -rename ""%{date} - %{time} - %{fn}.jpg""");
+            Console.WriteLine(@"FixCameraDate ""\files\*D*.mov"" -hour+8 -rename");
             return;
         }
-
-        string globPath = "", globMatch = cmdFn;
-        if (globMatch.Contains("\\"))
-        {
-            globPath = Path.GetDirectoryName(globMatch); globMatch = Path.GetFileName(globMatch);
-        }
-        else
-        {
-            globPath = Directory.GetCurrentDirectory();
-        }
-        var globFiles = Directory.GetFiles(globPath, globMatch);
-        if (globFiles.Length == 0) Console.WriteLine("Not found - \"{0}\"", cmdFn);
 
         var filesToDo = new Queue<FileToDo>();
         var gpsToDo = new Dictionary<int, FileToDo>();
         var gpsNextRequestId = 1;
-        foreach (var globFile in globFiles) filesToDo.Enqueue(new FileToDo { fn = globFile });
+        foreach (var fn in cmdFns) filesToDo.Enqueue(new FileToDo { fn = fn });
 
         while (filesToDo.Count > 0 || gpsToDo.Count > 0)
         {
