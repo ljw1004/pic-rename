@@ -3,9 +3,14 @@ Imports System.Net.Http
 Imports System.Threading
 Imports <xmlns="http://schemas.microsoft.com/search/local/ws/rest/v1">
 
+' TODO
+' (2) Write a TestGPS function which uses Bing
+' (3) Alter Bing to prefer landmarks if they're nearby
+
+
 Module Module1
 
-    Sub Test()
+    Sub TestMetadata()
         Dim fns = IO.Directory.GetFiles("test")
         For Each fn In fns
             Dim ft = FilestampTime(fn)
@@ -15,7 +20,7 @@ Module Module1
     End Sub
 
     Sub Main(args As String())
-        Test() : Return
+        TestMetadata() : Return
         ' Goals:
         ' (1) If you have shots from one or more devices, rename them to local time when the shot was taken
         ' (2) If you had taken shots on holiday without having fixed the timezone on your camera, fix their metadata timestamps
@@ -39,63 +44,76 @@ Module Module1
         ' Our objective is to rename the file according to "local" time when the photo/video was taken, without the timezone information.
 
         If BingMapsKey = "" Then Console.WriteLine("THIS VERSION HAS BEEN BUILT WITHOUT GPS SUPPORT")
-        Dim cmdFn = "", cmdPattern = "", cmdOffset As TimeSpan? = Nothing, cmdError = ""
-        Dim cmdArgs = New LinkedList(Of String)(args)
-        ' Get the filename
-        If cmdArgs.Count > 0 AndAlso Not cmdArgs.First.Value.StartsWith("/") Then cmdFn = cmdArgs.First.Value : cmdArgs.RemoveFirst()
-        ' Search for further switches
+
+        Dim cmdPattern = "", cmdError = "", cmdOffset As TimeSpan? = Nothing
+        Dim cmdFns As New List(Of String), cmdArgs As New LinkedList(Of String)(args)
+        '
         While cmdError = "" AndAlso cmdArgs.Count > 0
-            Dim switch = cmdArgs.First.Value : cmdArgs.RemoveFirst()
-            If switch = "/rename" Then
-                If cmdPattern <> "" Then cmdError = "duplicate /rename" : Exit While
+            Dim cmd = cmdArgs.First.Value : cmdArgs.RemoveFirst()
+
+            If cmd = "-rename" OrElse cmd = "/rename" Then
+                If cmdPattern <> "" Then cmdError = "duplicate /rename" : Return
                 cmdPattern = "%{datetime} - %{fn} - %{place}"
-                If cmdArgs.Count > 0 AndAlso Not cmdArgs.First.Value.StartsWith("/") Then cmdPattern = cmdArgs.First.Value : cmdArgs.RemoveFirst()
-            ElseIf switch.StartsWith("/day") OrElse switch.StartsWith("/hour") OrElse switch.StartsWith("/minute") Then
-                Dim len = 0, mkts As Func(Of Integer, TimeSpan) = Function(n) Nothing
-                If switch.StartsWith("/day") Then len = 4 : mkts = Function(n) TimeSpan.FromDays(n)
-                If switch.StartsWith("/hour") Then len = 5 : mkts = Function(n) TimeSpan.FromHours(n)
-                If switch.StartsWith("/minute") Then len = 7 : mkts = Function(n) TimeSpan.FromMinutes(n)
-                Dim snum = switch.Substring(len)
-                If Not snum.StartsWith("+") AndAlso Not snum.StartsWith("-") Then cmdError = switch : Exit While
-                Dim num = 0 : If Not Integer.TryParse(snum, num) Then cmdError = switch : Exit While
-                cmdOffset = If(cmdOffset.HasValue, cmdOffset, New TimeSpan(0))
+                If cmdArgs.Count > 0 AndAlso Not cmdArgs.First.Value.StartsWith("/") AndAlso Not cmdArgs.First.Value.StartsWith("-") Then cmdPattern = cmdArgs.First.Value : cmdArgs.RemoveFirst()
+
+            ElseIf cmd.StartsWith("/day") OrElse cmd.StartsWith("/hour") OrElse cmd.StartsWith("/minute") OrElse
+                                cmd.StartsWith("-day") OrElse cmd.StartsWith("-hour") OrElse cmd.StartsWith("-minute") Then
+                Dim len = 0, mkts As Func(Of Integer, TimeSpan) = Function() Nothing
+                If cmd.StartsWith("/day") OrElse cmd.StartsWith("-day") Then len = 4 : mkts = Function(n) TimeSpan.FromDays(n)
+                If cmd.StartsWith("/hour") OrElse cmd.StartsWith("-hour") Then len = 5 : mkts = Function(n) TimeSpan.FromHours(n)
+                If cmd.StartsWith("/minute") OrElse cmd.StartsWith("-minute") Then len = 7 : mkts = Function(n) TimeSpan.FromMinutes(n)
+                Dim snum = cmd.Substring(len)
+                If Not snum.StartsWith("+") AndAlso Not snum.StartsWith("-") Then cmdError = cmd : Exit While
+                Dim num = 0 : If Not Integer.TryParse(snum, num) Then cmdError = cmd : Exit While
+                cmdOffset = If(cmdOffset.HasValue, cmdOffset, Nothing)
                 cmdOffset = cmdOffset + mkts(num)
-            ElseIf switch = "/?" Then
-                cmdFn = ""
+
+            ElseIf cmd = "/?" OrElse cmd = "/help" OrElse cmd = "-help" OrElse cmd = "--help" Then
+                cmdFns.Clear() : Exit While
+
+            ElseIf cmd.StartsWith("-") Then
+                ' unknown option, so error out
+                cmdError = cmd : Exit While
+                ' We'd also like to error out on unknown options that start with "/",
+                ' but can't, because that's a valid filename in unix.
+
             Else
-                cmdError = switch : Exit While
+                If cmd.Contains("*") OrElse cmd.Contains("?") Then
+                    Dim globPath = IO.Path.GetDirectoryName(cmd), globMatch = IO.Path.GetFileName(cmd)
+                    If globPath.Contains("*") OrElse globPath.Contains("?") Then cmdError = "Can't match wildcard directory names" : Exit While
+                    If globPath = "" Then globPath = IO.Directory.GetCurrentDirectory()
+                    Dim fns = IO.Directory.GetFiles(globPath, globMatch)
+                    If fns.Length = 0 Then Console.WriteLine($"Not found - ""{cmd}""")
+                    cmdFns.AddRange(fns)
+                Else
+                    If IO.File.Exists(cmd) Then
+                        cmdFns.Add(cmd)
+                    Else
+                        Console.WriteLine($"Not found - ""{cmd}""")
+                    End If
+                End If
             End If
         End While
-        If cmdError <> "" Then Console.WriteLine("Unrecognized command: {0}", cmdError) : Return
-        If cmdArgs.Count > 0 Then Throw New Exception("Failed to parse command line")
-        If cmdFn = "" Then
-            Console.WriteLine("FixCameraDate ""a.jpg"" [/rename [""pattern""]] [/day+n] [/hour+n] [/minute+n]")
+
+        If cmdFns.Count = 0 Then
+            Console.WriteLine("FixCameraDate ""a.jpg"" ""b.jpg"" [-rename [""pattern""]] [-day+n] [-hour+n] [-minute+n]")
             Console.WriteLine("  Filename can include * and ? wildcards")
-            Console.WriteLine("  /rename: pattern defaults to ""%{datetime} - %{fn} - %{place}"" and")
-            Console.WriteLine("           can include %{date/time/year/month/day/hour/minute/second/place}")
-            Console.WriteLine("  /day,/hour,/minute: adjust the timestamp; can be + or -")
+            Console.WriteLine("  -rename: pattern defaults to ""%{datetime} - %{fn} - %{place}"" and")
+            Console.WriteLine("           can include %{datetime,fn,date,time,year,month,day,hour,minute,second,place}")
+            Console.WriteLine("  -day,-hour,-minute: adjust the timestamp; can be + or -")
             Console.WriteLine()
             Console.WriteLine("EXAMPLES:")
             Console.WriteLine("FixCameraDate ""a.jpg""")
-            Console.WriteLine("FixCameraDate ""*.jpg"" /rename ""%{date} - %{time} - %{fn}.jpg""")
-            Console.WriteLine("FixCameraDate ""*D*.mov"" /hour+8 /rename")
+            Console.WriteLine("FixCameraDate ""*.jpg"" -rename ""%{date} - %{time} - %{fn}.jpg""")
+            Console.WriteLine("FixCameraDate ""\files\*D*.mov"" -hour+8 -rename")
             Return
         End If
-
-        Dim globPath = "", globMatch = cmdFn
-        If globMatch.Contains("\") Then
-            globPath = IO.Path.GetDirectoryName(globMatch) : globMatch = IO.Path.GetFileName(globMatch)
-        Else
-            globPath = Environment.CurrentDirectory
-        End If
-        Dim globFiles = IO.Directory.GetFiles(globPath, globMatch)
-        If globFiles.Length = 0 Then Console.WriteLine("Not found - ""{0}""", cmdFn)
 
         Dim filesToDo As New Queue(Of FileToDo)
         Dim gpsToDo As New Dictionary(Of Integer, FileToDo)
         Dim gpsNextRequestId = 1
-        For Each globFile In globFiles
-            filesToDo.Enqueue(New FileToDo With {.fn = globFile})
+        For Each fn In cmdFns
+            filesToDo.Enqueue(New FileToDo With {.fn = fn})
         Next
 
 
@@ -130,7 +148,7 @@ Module Module1
                         ' e.g. all other files where we got the date from the filestamp
                         fileToDo.localTime = ft.dt.ToLocalTime() ' the best we can do is guess that the photo was taken in the timezone as this computer now
                     Else
-                        Throw New Exception("Expected filetimes to be in UTC")
+                        Throw New Exception("Expected filetimes To be In UTC")
                     End If
                 End If
             End If

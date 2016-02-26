@@ -9,13 +9,9 @@ using System.Xml.Linq;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 
-// TODO:
-// (2) Write a TestGPS function which uses Bing
-// (3) Alter Bing to prefer landmarks if they're nearby
-
 static partial class Program
 {
-    static void Test()
+    static void TestMetadata()
     {
         var fns = Directory.GetFiles("test");
         foreach (var fn in fns)
@@ -40,7 +36,7 @@ static partial class Program
             var cmd = cmdArgs.First.Value; cmdArgs.RemoveFirst();
             if (cmd == "-rename" || cmd=="/rename")
             {
-                if (cmdPattern != "") { cmdError = "duplicate /rename"; break; }
+                if (cmdPattern != "") { cmdError = "duplicate -rename"; return; }
                 cmdPattern = "%{datetime} - %{fn} - %{place}";
                 if (cmdArgs.Count > 0 && !cmdArgs.First.Value.StartsWith("/") && !cmdArgs.First.Value.StartsWith("-")) { cmdPattern = cmdArgs.First.Value; cmdArgs.RemoveFirst(); }
             }
