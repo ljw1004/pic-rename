@@ -88,12 +88,6 @@ static partial class Program
         }
 
 
-        Console.WriteLine($"cmdOffset: {cmdOffset}");
-        Console.WriteLine($"cmdPattern: {cmdPattern}");
-        Console.WriteLine("cmdFiles:");
-        foreach (var fn in cmdFns) Console.WriteLine($"   {fn}");
-        return;
-
         if (cmdFns.Count == 0)
         {
             Console.WriteLine(@"FixCameraDate ""a.jpg"" ""b.jpg"" [-rename [""pattern""]] [-day+n] [-hour+n] [-minute+n]");
