@@ -21,6 +21,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution 
 		spec.md = spec.md
 	EndProjectSection
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TestReverseGeocoding", "TestReverseGeocoding\TestReverseGeocoding.csproj", "{B7140947-1D3D-4850-A482-BC11A6EB0560}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -35,6 +37,10 @@ Global
 		{F671D47F-3CE7-41CC-979D-6B3E3CF60F67}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{F671D47F-3CE7-41CC-979D-6B3E3CF60F67}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{F671D47F-3CE7-41CC-979D-6B3E3CF60F67}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B7140947-1D3D-4850-A482-BC11A6EB0560}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B7140947-1D3D-4850-A482-BC11A6EB0560}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B7140947-1D3D-4850-A482-BC11A6EB0560}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B7140947-1D3D-4850-A482-BC11A6EB0560}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

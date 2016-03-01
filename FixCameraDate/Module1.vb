@@ -19,8 +19,33 @@ Module Module1
         Next
     End Sub
 
+    Sub TestGps()
+        'Sub DoGps(gpsToDo0 As Dictionary(Of Integer, FileToDo), filesToDo As Queue(Of FileToDo))
+        Dim gpsToDo As New Dictionary(Of Integer, FileToDo)
+        Dim filesToDo As New Queue(Of FileToDo)
+        gpsToDo.Add(11, New FileToDo With {.fn = "Montlake", .gpsCoordinates = New GpsCoordinates(47.637922, -122.301557)})
+        gpsToDo.Add(12, New FileToDo With {.fn = "Volunteer Park", .gpsCoordinates = New GpsCoordinates(47.629612, -122.315119)})
+        gpsToDo.Add(13, New FileToDo With {.fn = "Arboretum", .gpsCoordinates = New GpsCoordinates(47.639483, -122.29801)})
+        gpsToDo.Add(14, New FileToDo With {.fn = "Husky Stadium", .gpsCoordinates = New GpsCoordinates(47.65076, -122.302043)})
+        gpsToDo.Add(15, New FileToDo With {.fn = "UW Campus", .gpsCoordinates = New GpsCoordinates(47.656849, -122.309596)})
+        gpsToDo.Add(16, New FileToDo With {.fn = "Ballard", .gpsCoordinates = New GpsCoordinates(47.668719, -122.38296)})
+        gpsToDo.Add(17, New FileToDo With {.fn = "Shilshole", .gpsCoordinates = New GpsCoordinates(47.681006, -122.407513)})
+        gpsToDo.Add(18, New FileToDo With {.fn = "Space needle", .gpsCoordinates = New GpsCoordinates(47.620415, -122.349463)})
+        gpsToDo.Add(19, New FileToDo With {.fn = "Pike Place Market", .gpsCoordinates = New GpsCoordinates(47.609839, -122.342981)})
+        gpsToDo.Add(20, New FileToDo With {.fn = "Chaplains' Court in Old Aberdeen, Scotland", .gpsCoordinates = New GpsCoordinates(57.169365, -2.101216)})
+        gpsToDo.Add(21, New FileToDo With {.fn = "Aberdeen", .gpsCoordinates = New GpsCoordinates(57.14727, -2.095665)})
+        gpsToDo.Add(22, New FileToDo With {.fn = "Lihue", .gpsCoordinates = New GpsCoordinates(21.97472, -159.3656)})
+        gpsToDo.Add(23, New FileToDo With {.fn = "Barking Sands beach in Hawaii", .gpsCoordinates = New GpsCoordinates(22.034308, -159.785638)})
+        gpsToDo.Add(24, New FileToDo With {.fn = "Darra, Brisbane", .gpsCoordinates = New GpsCoordinates(-27.5014, 152.97272)})
+        gpsToDo.Add(25, New FileToDo With {.fn = "Queens' College Cambridge", .gpsCoordinates = New GpsCoordinates(52.196766, 0.12255)})
+        DoGps(gpsToDo, filesToDo)
+        For Each file In filesToDo
+            Console.WriteLine($"{file.fn} ... {file.hasGpsResult}")
+        Next
+    End Sub
+
     Sub Main(args As String())
-        TestMetadata() : Return
+        TestGps() : Return
         ' Goals:
         ' (1) If you have shots from one or more devices, rename them to local time when the shot was taken
         ' (2) If you had taken shots on holiday without having fixed the timezone on your camera, fix their metadata timestamps
@@ -352,8 +377,11 @@ Module Module1
     End Class
 
 
+    Dim http As New HttpClient
+
     Sub DoGps(gpsToDo0 As Dictionary(Of Integer, FileToDo), filesToDo As Queue(Of FileToDo))
-        Static Dim http As New HttpClient
+        ' https://msdn.microsoft.com/en-us/library/jj735475.aspx
+
         Dim gpsToDo As New Dictionary(Of Integer, FileToDo)(gpsToDo0)
         gpsToDo0.Clear()
         Console.Write($"Looking up {gpsToDo.Count} GPS places")
@@ -362,7 +390,7 @@ Module Module1
         Dim queryData = "Bing Spatial Data Services, 2.0" & vbCrLf
         queryData &= "Id|GeocodeRequest/Culture|ReverseGeocodeRequest/IncludeEntityTypes|ReverseGeocodeRequest/Location/Latitude|ReverseGeocodeRequest/Location/Longitude|GeocodeResponse/Address/Neighborhood|GeocodeResponse/Address/Locality|GeocodeResponse/Address/AdminDistrict|GeocodeResponse/Address/CountryRegion" & vbCrLf
         For Each kv In gpsToDo
-            queryData &= $"{kv.Key}|en-US|neighborhood|{kv.Value.gpsCoordinates.Latitude:0.000000}|{kv.Value.gpsCoordinates.Longitude:0.000000}{vbCrLf}"
+            queryData &= $"{kv.Key}|en-US|Neighborhood|{kv.Value.gpsCoordinates.Latitude:0.000000}|{kv.Value.gpsCoordinates.Longitude:0.000000}{vbCrLf}"
         Next
         Dim queryUri = $"http://spatial.virtualearth.net/REST/v1/dataflows/geocode?input=pipe&key={BingMapsKey}"
         Console.Write(".")
@@ -472,6 +500,12 @@ Module Module1
     Class GpsCoordinates
         Public Latitude As Double
         Public Longitude As Double
+        Public Sub New()
+        End Sub
+        Public Sub New(latitude As Double, longitude As Double)
+            Me.Latitude = latitude
+            Me.Longitude = longitude
+        End Sub
         Public Overrides Function ToString() As String
             Return $"lat={Latitude:0.00} long={Longitude:0.00}"
         End Function
