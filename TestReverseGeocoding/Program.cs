@@ -94,14 +94,10 @@ static partial class Program
             var country = xml.Descendants("country").FirstOrDefault()?.Value;
             // 3. Assemble these into a name
             var parts = new List<string>();
-            if (result != null) parts.Add(result);
-            else if (road != null) parts.Add(road);
-            if (suburb != null) parts.Add(suburb);
-            else if (neighbourhood != null) parts.Add(neighbourhood);
-            if (city != null) parts.Add(city);
-            else if (county != null) parts.Add(county);
-            if (country == "United States of America" || country == "United Kingdom") parts.Add(state);
-            else parts.Add(country);
+            if (result != null) parts.Add(result); else if (road != null) parts.Add(road);
+            if (suburb != null) parts.Add(suburb); else if (neighbourhood != null) parts.Add(neighbourhood);
+            if (city != null) parts.Add(city); else if (county != null) parts.Add(county);
+            if (country == "United States of America" || country == "United Kingdom") parts.Add(state); else parts.Add(country);
             int pi = 1; while (pi < parts.Count - 1)
             {
                 if (parts.Take(pi).Any(s => s.Contains(parts[pi]))) parts.RemoveAt(pi);

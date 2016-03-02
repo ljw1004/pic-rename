@@ -1,16 +1,33 @@
-﻿using System;
+﻿// FixCameraDate, (c) Lucian Wischik
+// ------------------------------------
+
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Net.Http;
-using System.Threading;
 using System.IO;
 using System.Xml.Linq;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 
-static partial class Program
+
+static class Program
 {
+    static void Main(string[] args)
+    {
+        var cmd = ParseCommandLine(args); if (cmd == null) return;
+
+        foreach (var fn in cmd.Fns)
+        {
+            var fileToDo = GetMetadata(fn); if (fileToDo == null) continue;
+            if (cmd.Pattern == "" && !cmd.Offset.HasValue) Console.WriteLine("\"{0}\": {1:yyyy.MM.dd - HH.mm.ss}", Path.GetFileName(fileToDo.fn), fileToDo.localTime);
+            if (cmd.Offset.HasValue) ModifyTimestamp(cmd, fileToDo);
+            if (cmd.Pattern != "") RenameFile(cmd, fileToDo);
+        }
+    }
+
+
     static void TestMetadata()
     {
         var fns = Directory.GetFiles("test");
@@ -22,23 +39,53 @@ static partial class Program
         }
     }
 
-
-    static void Main(string[] args)
+    static void TestGps()
     {
-        if (BingMapsKey == "") Console.WriteLine("THIS VERSION HAS BEEN BUILT WITHOUT GPS SUPPORT");
+        // North America
+        Console.WriteLine("Montlake, Seattle - " + Gps(47.637922, -122.301557));
+        Console.WriteLine("Volunteer Park, Seattle - " + Gps(47.629612, -122.315119));
+        Console.WriteLine("Arboretum, Seattle - " + Gps(47.639483, -122.29801));
+        Console.WriteLine("Husky Stadium, Seattle - " + Gps(47.65076, -122.302043));
+        Console.WriteLine("Ballard, Seattle - " + Gps(47.668719, -122.38296));
+        Console.WriteLine("Shilshole Marina, Seattle - " + Gps(47.681006, -122.407513));
+        Console.WriteLine("Space Needle, Seattle - " + Gps(47.620415, -122.349463));
+        Console.WriteLine("Pike Place Market, Seattle - " + Gps(47.609839, -122.342981));
+        Console.WriteLine("UW Campus, Seattle - " + Gps(47.65464, -122.30843));
+        Console.WriteLine("Stuart Island, WA - " + Gps(48.67998, -123.23106));
+        Console.WriteLine("Lihue, Kauai - " + Gps(21.97472, -159.3656));
+        Console.WriteLine("Polihale Beach, Kauai - " + Gps(22.08223, -159.76265));
+        // Europe
+        Console.WriteLine("Aberdeen, Scotland - " + Gps(57.14727, -2.095665));
+        Console.WriteLine("The Chanonry, Old Aberdeen - " + Gps(57.169365, -2.101216));
+        Console.WriteLine("Queens// College, Cambridge - " + Gps(52.20234, 0.11589));
+        Console.WriteLine("Eiffel Tower, Paris - " + Gps(48.858262, 2.293763));
+        Console.WriteLine("Trevi Fountain, Rome - " + Gps(41.900914, 12.483172));
+        // Canada
+        Console.WriteLine("Stanley Park, Vancouver - " + Gps(49.31168, -123.14786));
+        Console.WriteLine("Butchart Gardens, Vancouver Island - " + Gps(48.56686, -123.46688));
+        Console.WriteLine("Sidney Island, BC - " + Gps(48.65287, -123.34463));
+        // Australasia
+        Console.WriteLine("Darra, Brisbane - " + Gps(-27.5014, 152.97272));
+        Console.WriteLine("Sidney Opera House - " + Gps(-33.85733, 151.21516));
+        Console.WriteLine("Taj Mahal, India - " + Gps(27.17409, 78.04171));
+        Console.WriteLine("Forbidden City, Beijing - " + Gps(39.91639, 116.39023));
+        Console.WriteLine("Angkor Wat, Cambodia - " + Gps(13.41111, 103.86234));
+    }
 
-        string cmdPattern = "", cmdError = ""; TimeSpan? cmdOffset = null;
-        var cmdFns = new List<string>();
+
+    static CommandLine ParseCommandLine(string[] args)
+    {
         var cmdArgs = new LinkedList<string>(args);
-        //
-        while (cmdError == "" && cmdArgs.Count > 0)
+        var r = new CommandLine();
+
+        while (cmdArgs.Count > 0)
         {
             var cmd = cmdArgs.First.Value; cmdArgs.RemoveFirst();
-            if (cmd == "-rename" || cmd=="/rename")
+            if (cmd == "-rename" || cmd == "/rename")
             {
-                if (cmdPattern != "") { cmdError = "duplicate -rename"; return; }
-                cmdPattern = "%{datetime} - %{fn} - %{place}";
-                if (cmdArgs.Count > 0 && !cmdArgs.First.Value.StartsWith("/") && !cmdArgs.First.Value.StartsWith("-")) { cmdPattern = cmdArgs.First.Value; cmdArgs.RemoveFirst(); }
+                if (r.Pattern != "") { Console.WriteLine("duplicate -rename"); return null; }
+                r.Pattern = "%{datetime} - %{fn} - %{place}";
+                if (cmdArgs.Count > 0 && !cmdArgs.First.Value.StartsWith("/") && !cmdArgs.First.Value.StartsWith("-")) { r.Pattern = cmdArgs.First.Value; cmdArgs.RemoveFirst(); }
             }
             else if (cmd.StartsWith("/day") || cmd.StartsWith("/hour") || cmd.StartsWith("/minute")
                 || cmd.StartsWith("-day") || cmd.StartsWith("-hour") || cmd.StartsWith("-minute"))
@@ -48,19 +95,19 @@ static partial class Program
                 if (cmd.StartsWith("/hour") || cmd.StartsWith("-hour")) { len = 5; mkts = (n) => TimeSpan.FromHours(n); }
                 if (cmd.StartsWith("/minute") || cmd.StartsWith("-minute")) { len = 7; mkts = (n) => TimeSpan.FromMinutes(n); }
                 var snum = cmd.Substring(len);
-                if (!snum.StartsWith("+") && !snum.StartsWith("-")) { cmdError = cmd; break; }
-                var num = 0; if (!int.TryParse(snum, out num)) { cmdError = cmd; break; }
-                cmdOffset = cmdOffset.HasValue ? cmdOffset : new TimeSpan(0);
-                cmdOffset = cmdOffset + mkts(num);
+                if (!snum.StartsWith("+") && !snum.StartsWith("-")) { Console.WriteLine(cmd); return null; }
+                var num = 0; if (!int.TryParse(snum, out num)) { Console.WriteLine(cmd); return null; }
+                r.Offset = r.Offset.HasValue ? r.Offset : new TimeSpan(0);
+                r.Offset = r.Offset + mkts(num);
             }
-            else if (cmd == "/?" || cmd=="/help" || cmd=="-help" || cmd=="--help")
+            else if (cmd == "/?" || cmd == "/help" || cmd == "-help" || cmd == "--help")
             {
-                cmdFns.Clear(); break;
+                r.Fns.Clear(); break;
             }
             else if (cmd.StartsWith("-"))
             {
                 // unknown option, so error out:
-                cmdError = cmd; break;
+                Console.WriteLine(cmd); return null;
                 // We'd also like to error out on unknown options that start with "/",
                 // but can't, because that's a valid filename in unix.
             }
@@ -69,22 +116,22 @@ static partial class Program
                 if (cmd.Contains("*") || cmd.Contains("?"))
                 {
                     string globPath = Path.GetDirectoryName(cmd), globMatch = Path.GetFileName(cmd);
-                    if (globPath.Contains("*") || globPath.Contains("?")) { cmdError = "Can't match wildcard directory names"; break; }
+                    if (globPath.Contains("*") || globPath.Contains("?")) { Console.WriteLine("Can't match wildcard directory names"); return null; }
                     if (globPath == "") globPath = Directory.GetCurrentDirectory();
                     var fns = Directory.GetFiles(globPath, globMatch);
                     if (fns.Length == 0) Console.WriteLine($"Not found - \"{cmd}\"");
-                    cmdFns.AddRange(fns);
+                    r.Fns.AddRange(fns);
                 }
                 else
                 {
-                    if (File.Exists(cmd)) cmdFns.Add(cmd);
+                    if (File.Exists(cmd)) r.Fns.Add(cmd);
                     else Console.WriteLine($"Not found - \"{cmd}\"");
                 }
             }
         }
 
 
-        if (cmdFns.Count == 0)
+        if (r.Fns.Count == 0)
         {
             Console.WriteLine(@"FixCameraDate ""a.jpg"" ""b.jpg"" [-rename [""pattern""]] [-day+n] [-hour+n] [-minute+n]");
             Console.WriteLine(@"  Filename can include * and ? wildcards");
@@ -96,176 +143,88 @@ static partial class Program
             Console.WriteLine(@"FixCameraDate ""a.jpg""");
             Console.WriteLine(@"FixCameraDate ""*.jpg"" -rename ""%{date} - %{time} - %{fn}.jpg""");
             Console.WriteLine(@"FixCameraDate ""\files\*D*.mov"" -hour+8 -rename");
-            return;
+            return null;
         }
 
-        var filesToDo = new Queue<FileToDo>();
-        var gpsToDo = new Dictionary<int, FileToDo>();
-        var gpsNextRequestId = 1;
-        foreach (var fn in cmdFns) filesToDo.Enqueue(new FileToDo { fn = fn });
 
-        while (filesToDo.Count > 0 || gpsToDo.Count > 0)
+        if (string.IsNullOrEmpty(r.Pattern)) return r;
+
+        // Filename heuristics:
+        // (1) If the user omitted an extension from the rename string, then we re-use the one that was given to us
+        // (2) If the filename already matched our datetime format, then we figure out what was the base filename
+        if (!r.Pattern.Contains("%{fn}")) { Console.WriteLine("Please include %{fn} in the pattern"); return null; }
+        if (r.Pattern.Contains("\\") || r.Pattern.Contains("/")) { Console.WriteLine("Folders not allowed in pattern"); return null; }
+        if (r.Pattern.Split(new[] { "%{fn}" }, StringSplitOptions.None).Length != 2) { Console.WriteLine("Please include %{fn} only once in the pattern"); return null; }
+        //
+        // 1. Extract out the extension
+        var pattern = r.Pattern;
+        r.PatternExt = null;
+        foreach (var potentialExt in new[] { ".jpg", ".mp4", ".mov", ".jpeg" })
         {
-            if (filesToDo.Count == 0) DoGps(gpsToDo, filesToDo);
-            if (filesToDo.Count == 0) break;
-            var fileToDo = filesToDo.Dequeue();
+            if (!pattern.ToLower().EndsWith(potentialExt)) continue;
+            r.PatternExt = pattern.Substring(pattern.Length - potentialExt.Length);
+            pattern = pattern.Substring(0, pattern.Length - potentialExt.Length);
+            break;
+        }
+        //
+        // 2. Parse the pattern-string into its constitutent parts
+        var patternSplit0 = pattern.Split(new[] { '%' });
+        var patternSplit = new List<string>();
+        if (patternSplit0[0].Length > 0) patternSplit.Add(patternSplit0[0]);
+        for (int i = 1; i < patternSplit0.Length; i++)
+        {
+            var s = "%" + patternSplit0[i];
+            if (!s.StartsWith("%{")) { Console.WriteLine("ERROR: wrong pattern"); return null; }
+            var ib = s.IndexOf("}");
+            patternSplit.Add(s.Substring(0, ib + 1));
+            if (ib != s.Length - 1) patternSplit.Add(s.Substring(ib + 1));
+        }
 
-            if (!fileToDo.hasInitialScan)
-            {
-                fileToDo.hasInitialScan = true;
-                var mtt = MetadataTimeAndGps(fileToDo.fn);
-                var ftt = FilestampTime(fileToDo.fn);
-                if (mtt == null) { Console.WriteLine("Not an image/video - \"{0}\"", Path.GetFileName(fileToDo.fn)); continue; }
-                var mt = mtt.Item1; var ft = ftt.Item1;
-                if (mt.HasValue)
-                {
-                    fileToDo.setter = mtt.Item2;
-                    fileToDo.gpsCoordinates = mtt.Item3;
-                    if (mt.Value.dt.Kind == System.DateTimeKind.Unspecified || mt.Value.dt.Kind == System.DateTimeKind.Local)
-                    {
-                        // If dt.kind=Unspecified (e.g. EXIF, Sony), then the time is by assumption already local from when the picture was shot
-                        // If dt.kind=Local (e.g. iPhone-MOV), then the time is local, and also indicates its timezone offset
-                        fileToDo.localTime = mt.Value.dt;
-                    }
-                    else if (mt.Value.dt.Kind == System.DateTimeKind.Utc)
-                    {
-                        // If dt.Kind=UTC (e.g. Android), then time is in UTC, and we don't know how to read timezone.
-                        fileToDo.localTime = mt.Value.dt.ToLocalTime(); // Best we can do is guess the timezone of the computer
-                    }
-                }
-                else
-                {
-                    fileToDo.setter = ftt.Item2;
-                    if (ft.dt.Kind == System.DateTimeKind.Unspecified)
-                    {
-                        // e.g. Windows Phone when we got the date from the filename
-                        fileToDo.localTime = ft.dt;
-                    }
-                    else if (ft.dt.Kind == System.DateTimeKind.Utc)
-                    {
-                        // e.g. all other files where we got the date from the filestamp
-                        fileToDo.localTime = ft.dt.ToLocalTime(); // the best we can do is guess that the photo was taken in the timezone as this computer now
-                    }
-                    else
-                    {
-                        throw new Exception("Expected filetimes to be in UTC");
-                    }
-                }
-            }
+        foreach (var rsplit in patternSplit)
+        {
+            var part = new PatternPart();
+            part.pattern = rsplit;
 
-            // The only thing that requires GPS is if (1) we're doing a rename, (2) the
-            // pattern includes place, (3) the file actually has a GPS signature
-            if (cmdPattern.Contains("%{place}") && fileToDo.gpsCoordinates != null && fileToDo.hasGpsResult == null && !string.IsNullOrEmpty(BingMapsKey))
+            if (!rsplit.StartsWith("%"))
             {
-                gpsNextRequestId += 1;
-                gpsToDo.Add(gpsNextRequestId, fileToDo);
-                if (gpsToDo.Count >= 50) DoGps(gpsToDo, filesToDo);
+                part.generator = (_1, _2, _3) => rsplit;
+                part.matcher = (rr) =>
+                {
+                    if (rr.Length < rsplit.Length) return -1;
+                    if (rr.Substring(0, rsplit.Length) == rsplit) return rsplit.Length;
+                    return -1;
+                };
+                var prevPart = r.PatternParts.LastOrDefault();
+                if (prevPart != null && prevPart.matcher == null)
+                {
+                    prevPart.matcher = (rr) =>
+                    {
+                        var i = rr.IndexOf(rsplit);
+                        if (i == -1) return rr.Length;
+                        return i;
+                    };
+                }
+                r.PatternParts.AddLast(part);
                 continue;
             }
 
-            // Otherwise, by assumption here, either we have GPS result or we don't need it
-
-            if (cmdPattern == "" && !cmdOffset.HasValue)
+            if (rsplit.StartsWith("%{fn}"))
             {
-                Console.WriteLine("\"{0}\": {1:yyyy.MM.dd - HH.mm.ss}", Path.GetFileName(fileToDo.fn), fileToDo.localTime);
+                part.generator = (fn2, dt2, pl2) => fn2;
+                part.matcher = null; // must be filled in by the next part
+                r.PatternParts.AddLast(part);
+                continue;
             }
 
-
-            if (cmdOffset.HasValue)
+            if (rsplit.StartsWith("%{place}"))
             {
-                using (var file = new FileStream(fileToDo.fn, FileMode.Open, FileAccess.ReadWrite))
-                {
-                    var prevTime = fileToDo.localTime;
-                    var r = fileToDo.setter(file, cmdOffset.Value);
-                    if (r)
-                    {
-                        fileToDo.localTime += cmdOffset.Value;
-                        if (cmdPattern == "") Console.WriteLine("\"{0}\": {1:yyyy.MM.dd - HH.mm.ss}, corrected from {2:yyyy.MM.dd - HH.mm.ss}", Path.GetFileName(fileToDo.fn), fileToDo.localTime, prevTime);
-                    }
-                }
+                part.generator = (fn2, dt2, pl2) => pl2;
+                part.matcher = null; // must be filled in by the next part
+                r.PatternParts.AddLast(part);
+                continue;
             }
 
-
-            if (cmdPattern != "")
-            {
-                // Filename heuristics:
-                // (1) If the user omitted an extension from the rename string, then we re-use the one that was given to us
-                // (2) If the filename already matched our datetime format, then we figure out what was the base filename
-                if (!cmdPattern.Contains("%{fn}")) { Console.WriteLine("Please include %{fn} in the pattern"); return; }
-                if (cmdPattern.Contains("\\")) { Console.WriteLine("Folders not allowed in pattern"); return; }
-                if (cmdPattern.Split(new[] { "%{fn}" }, StringSplitOptions.None).Length != 2) { Console.WriteLine("Please include %{fn} only once in the pattern"); return; }
-                //
-                // 1. Extract out the extension
-                var pattern = cmdPattern;
-                string patternExt = null;
-                foreach (var potentialExt in new[] { ".jpg", ".mp4", ".mov", ".jpeg" })
-                {
-                    if (!pattern.ToLower().EndsWith(potentialExt)) continue;
-                    patternExt = pattern.Substring(pattern.Length - potentialExt.Length);
-                    pattern = pattern.Substring(0, pattern.Length - potentialExt.Length);
-                    break;
-                }
-                if (patternExt == null) patternExt = Path.GetExtension(fileToDo.fn);
-                //
-                // 2. Parse the pattern-string into its constitutent parts
-                var patternSplit0 = pattern.Split(new[] { '%' });
-                var patternSplit = new List<string>();
-                if (patternSplit0[0].Length > 0) patternSplit.Add(patternSplit0[0]);
-                for (int i = 1; i < patternSplit0.Length; i++)
-                {
-                    var s = "%" + patternSplit0[i];
-                    if (!s.StartsWith("%{")) { Console.WriteLine("ERROR: wrong pattern"); return; }
-                    var ib = s.IndexOf("}");
-                    patternSplit.Add(s.Substring(0, ib + 1));
-                    if (ib != s.Length - 1) patternSplit.Add(s.Substring(ib + 1));
-                }
-                var patternParts = new LinkedList<PatternPart>();
-
-                foreach (var rsplit in patternSplit)
-                {
-                    var part = new PatternPart();
-                    part.pattern = rsplit;
-
-                    if (!rsplit.StartsWith("%"))
-                    {
-                        part.generator = (_1,_2,_3) => rsplit;
-                        part.matcher = (rr) =>
-                        {
-                            if (rr.Length < rsplit.Length) return -1;
-                            if (rr.Substring(0, rsplit.Length) == rsplit) return rsplit.Length;
-                            return -1;
-                        };
-                        var prevPart = patternParts.LastOrDefault();
-                        if (prevPart != null && prevPart.matcher == null)
-                        {
-                            prevPart.matcher = (rr) =>
-                            {
-                                var i = rr.IndexOf(rsplit);
-                                if (i == -1) return rr.Length;
-                                return i;
-                            };
-                        }
-                        patternParts.AddLast(part);
-                        continue;
-                    }
-
-                    if (rsplit.StartsWith("%{fn}"))
-                    {
-                        part.generator = (fn2, dt2, pl2) => fn2;
-                        part.matcher = null; // must be filled in by the next part
-                        patternParts.AddLast(part);
-                        continue;
-                    }
-
-                    if (rsplit.StartsWith("%{place}"))
-                    {
-                        part.generator = (fn2, dt2, pl2) => pl2;
-                        part.matcher = null; // must be filled in by the next part
-                        patternParts.AddLast(part);
-                        continue;
-                    }
-
-                    var escapes = new[] {"%{datetime}", "yyyy.MM.dd - HH.mm.ss", @"\d\d\d\d\.\d\d\.\d\d - \d\d\.\d\d\.\d\d",
+            var escapes = new[] {"%{datetime}", "yyyy.MM.dd - HH.mm.ss", @"\d\d\d\d\.\d\d\.\d\d - \d\d\.\d\d\.\d\d",
                                    "%{date}", "yyyy.MM.dd", @"\d\d\d\d\.\d\d\.\d\d",
                                    "%{time}", "HH.mm.ss", @"\d\d\.\d\d\.\d\d",
                                    "%{year}", "yyyy", @"\d\d\d\d",
@@ -274,192 +233,197 @@ static partial class Program
                                    "%{hour}", "HH", @"\d\d",
                                    "%{minute}", "mm", @"\d\d",
                                    "%{second}", "ss", @"\d\d"};
-                    string escape = "", fmt = "", regex = "";
-                    for (int i = 0; i < escapes.Length; i += 3)
-                    {
-                        if (!rsplit.StartsWith(escapes[i])) continue;
-                        escape = escapes[i];
-                        fmt = escapes[i + 1];
-                        regex = "^" + escapes[i + 2] + "$";
-                        break;
-                    }
-                    if (escape == "") { Console.WriteLine("Unrecognized {0}", rsplit); return; }
-                    part.generator = (fn2, dt2, pl2) => dt2.ToString(fmt);
-                    part.matcher = (rr) =>
-                    {
-                        if (rr.Length < fmt.Length) return -1;
-                        if (new Regex(regex).IsMatch(rr.Substring(0, fmt.Length))) return fmt.Length;
-                        return -1;
-                    };
-                    patternParts.AddLast(part);
-                }
-
-                // The last part, if it was %{fn} or %{place} will match
-                // up to the remainder of the original filename
-                var lastPart = patternParts.Last.Value;
-                if (lastPart.matcher != null) lastPart.matcher = (rr) => rr.Length;
-
-                //
-                // 3. Attempt to match the existing filename against the pattern
-                var basefn = Path.GetFileNameWithoutExtension(fileToDo.fn);
-                var matchremainder = basefn;
-                var matchParts = new LinkedList<PatternPart>(patternParts);
-                while (matchParts.Count > 0 && matchremainder.Length > 0)
-                {
-                    var matchPart = matchParts.First.Value;
-                    var matchLength = matchPart.matcher(matchremainder);
-                    if (matchLength == -1) break;
-                    matchParts.RemoveFirst();
-                    if (matchPart.pattern == "%{fn}") basefn = matchremainder.Substring(0, matchLength);
-                    matchremainder = matchremainder.Substring(matchLength);
-                }
-
-                if (matchremainder.Length == 0 && matchParts.Count == 2 && matchParts.First.Value.pattern == " - " && matchParts.Last.Value.pattern == "%{place}")
-                {
-                    // hack if you had pattern like "%{year} - %{fn} - %{place}" so
-                    // it will match a filename like "2012 - file.jpg" which lacks a place
-                    matchParts.Clear();
-                }
-
-                if (matchParts.Count != 0 || matchremainder.Length > 0)
-                {
-                    // failed to do a complete match
-                    basefn = Path.GetFileNameWithoutExtension(fileToDo.fn);
-                }
-
-                //
-                // 4. Figure out the new filename
-                var newfn = Path.GetDirectoryName(fileToDo.fn) + "\\";
-                foreach (var patternPart in patternParts)
-                {
-                    newfn += patternPart.generator(basefn, fileToDo.localTime, fileToDo.hasGpsResult);
-                }
-                if (patternParts.Count > 2 && patternParts.Last.Value.pattern == "%{place}" && patternParts.Last.Previous.Value.pattern == " - " && String.IsNullOrEmpty(fileToDo.hasGpsResult))
-                {
-                    if (newfn.EndsWith(" - ")) newfn = newfn.Substring(0, newfn.Length - 3);
-                }
-                newfn += patternExt;
-                if (fileToDo.fn != newfn)
-                {
-                    if (File.Exists(newfn)) { Console.WriteLine("Already exists - " + Path.GetFileName(newfn)); continue; }
-                    Console.WriteLine(Path.GetFileName(newfn));
-                    File.Move(fileToDo.fn, newfn);
-                }
-            }
-
-        }
-
-    }
-
-    static HttpClient http = new HttpClient();
-
-    static void DoGps(Dictionary<int, FileToDo> gpsToDo0, Queue<FileToDo> filesToDo)
-    {
-        var gpsToDo = new Dictionary<int, FileToDo>(gpsToDo0);
-        gpsToDo0.Clear();
-        Console.Write($"Looking up {gpsToDo.Count} GPS places");
-
-        // Send the request
-        var queryData = "Bing Spatial Data Services, 2.0\r\n";
-        queryData += "Id|GeocodeRequest/Culture|ReverseGeocodeRequest/IncludeEntityTypes|ReverseGeocodeRequest/Location/Latitude|ReverseGeocodeRequest/Location/Longitude|GeocodeResponse/Address/Neighborhood|GeocodeResponse/Address/Locality|GeocodeResponse/Address/AdminDistrict|GeocodeResponse/Address/CountryRegion\r\n";
-        foreach (var kv in gpsToDo)
-        {
-            queryData += $"{kv.Key}|en-US|neighborhood|{kv.Value.gpsCoordinates.Latitude:0.000000}|{kv.Value.gpsCoordinates.Longitude:0.000000}\r\n";
-        }
-        var queryUri = $"http://spatial.virtualearth.net/REST/v1/dataflows/geocode?input=pipe&key={BingMapsKey}";
-        Console.Write(".");
-        var statusResp = http.PostAsync(queryUri, new StringContent(queryData)).GetAwaiter().GetResult();
-        if (!statusResp.IsSuccessStatusCode) { Console.WriteLine($"ERROR {statusResp.StatusCode} - {statusResp.ReasonPhrase}"); return; }
-        if (string.IsNullOrEmpty(statusResp.Headers.Location?.ToString())) { Console.WriteLine(" ERROR - no location"); return; }
-        var statusUri = statusResp.Headers.Location.ToString();
-        Console.Write(".");
-
-        // Ping the location until we get somewhere
-        var resultUri = "";
-        while (true)
-        {
-            Thread.Sleep(2000);
-            Console.Write(".");
-            var statusRaw = http.GetStringAsync($"{statusUri}?key={BingMapsKey}&output=xml").GetAwaiter().GetResult();
-            Console.Write(".");
-            var statusXml = XDocument.Parse(statusRaw);
-            var status = statusXml.Descendants(XName.Get("Status", "http://schemas.microsoft.com/search/local/ws/rest/v1")).FirstOrDefault()?.Value;
-            if (status == null) { Console.WriteLine("ERROR didn't find status"); return; }
-            if (status == "Pending") continue;
-            if (status == "Failed") { Console.WriteLine("ERROR 'Failed'"); return; }
-            resultUri = (from link in statusXml.Descendants(XName.Get("Link", "http://schemas.microsoft.com/search/local/ws/rest/v1"))
-                         where link.Attribute("role")?.Value == "output" && link.Attribute("name")?.Value == "succeeded"
-                         select link.Value).FirstOrDefault();
-            break;
-        }
-        if (string.IsNullOrEmpty(resultUri)) { Console.WriteLine("ERROR no results"); return; }
-
-        var resultRaw = http.GetStringAsync($"{resultUri}?key={BingMapsKey}&output=json").GetAwaiter().GetResult();
-        Console.Write(".");
-        var resultLines = resultRaw.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Skip(2).ToArray();
-        foreach (var result in resultLines)
-        {
-            var parts = result.Split(new[] { '|' });
-            var parts2 = new List<string>();
-            var id = int.Parse(parts[0]);
-            var neighborhood = parts[5]; // Capitol Hill
-            var locality = parts[6]; // Seattle
-            var adminDistrict = parts[7]; // WA
-            var country = parts[8]; // United States
-            if (!string.IsNullOrEmpty(neighborhood)) parts2.Add(neighborhood);
-            if (!string.IsNullOrEmpty(locality)) parts2.Add(locality);
-            if (!string.IsNullOrEmpty(adminDistrict)) parts2.Add(adminDistrict);
-            if (!string.IsNullOrEmpty(country)) parts2.Add(country);
-            var place = String.Join(", ", parts2);
-            if (!string.IsNullOrEmpty(place))
+            string escape = "", fmt = "", regex = "";
+            for (int i = 0; i < escapes.Length; i += 3)
             {
-                gpsToDo[id].hasGpsResult = place;
-                filesToDo.Enqueue(gpsToDo[id]);
+                if (!rsplit.StartsWith(escapes[i])) continue;
+                escape = escapes[i];
+                fmt = escapes[i + 1];
+                regex = "^" + escapes[i + 2] + "$";
+                break;
+            }
+            if (escape == "") { Console.WriteLine("Unrecognized {0}", rsplit); return null; }
+            part.generator = (fn2, dt2, pl2) => dt2.ToString(fmt);
+            part.matcher = (rr) =>
+            {
+                if (rr.Length < fmt.Length) return -1;
+                if (new Regex(regex).IsMatch(rr.Substring(0, fmt.Length))) return fmt.Length;
+                return -1;
+            };
+            r.PatternParts.AddLast(part);
+        }
+
+        // The last part, if it was %{fn} or %{place} will match
+        // up to the remainder of the original filename
+        var lastPart = r.PatternParts.Last.Value;
+        if (lastPart.matcher != null) lastPart.matcher = (rr) => rr.Length;
+
+        return r;
+    }
+
+
+    static FileToDo GetMetadata(string fn)
+    {
+        var r = new FileToDo() { fn = fn };
+
+        var mtt = MetadataTimeAndGps(fn);
+        var ftt = FilestampTime(fn);
+        if (mtt == null) { Console.WriteLine("Not an image/video - \"{0}\"", Path.GetFileName(fn)); return null; }
+
+        var mt = mtt.Item1; var ft = ftt.Item1;
+        if (mt.HasValue)
+        {
+            r.setter = mtt.Item2;
+            if (mtt.Item3 != null) r.place = Gps(mtt.Item3.Latitude, mtt.Item3.Longitude); ;
+
+            if (mt.Value.dt.Kind == DateTimeKind.Unspecified || mt.Value.dt.Kind == DateTimeKind.Local)
+            {
+                // If dt.kind=Unspecified (e.g. EXIF, Sony), then the time is by assumption already local from when the picture was shot
+                // If dt.kind=Local (e.g. iPhone-MOV), then the time is local, and also indicates its timezone offset
+                r.localTime = mt.Value.dt;
+            }
+            else if (mt.Value.dt.Kind == DateTimeKind.Utc)
+            {
+                // If dt.Kind=UTC (e.g. Android), then time is in UTC, and we don't know how to read timezone.
+                r.localTime = mt.Value.dt.ToLocalTime(); // Best we can do is guess the timezone of the computer
             }
         }
-        Console.WriteLine("done");
+        else
+        {
+            r.setter = ftt.Item2;
+            if (ft.dt.Kind == DateTimeKind.Unspecified)
+            {
+                // e.g. Windows Phone when we got the date from the filename
+                r.localTime = ft.dt;
+            }
+            else if (ft.dt.Kind == DateTimeKind.Utc)
+            {
+                // e.g. all other files where we got the date from the filestamp
+                r.localTime = ft.dt.ToLocalTime(); // the best we can do is guess that the photo was taken in the timezone as this computer now
+            }
+            else
+            {
+                throw new Exception("Expected filetimes to be in UTC");
+            }
+        }
+
+        return r;
     }
 
 
-    delegate string PartGenerator(string fn, DateTime dt, string place);
-    delegate int MatchFunction(string remainder); // -1 for no-match, otherwise is the number of characters gobbled up
-    delegate bool UpdateTimeFunc(Stream stream, TimeSpan off);
-
-    static readonly Tuple<DateTimeKind?, UpdateTimeFunc, GpsCoordinates> EmptyResult = new Tuple<DateTimeKind?, UpdateTimeFunc, GpsCoordinates>(null, (s,t) => false, null);
-
-    class GpsCoordinates
+    static void ModifyTimestamp(CommandLine cmd, FileToDo fileToDo)
     {
-        public double Latitude;
-        public double Longitude;
-        public override string ToString() => $"lat={Latitude:0.00} long={Longitude:0.00}";
+        using (var file = new FileStream(fileToDo.fn, FileMode.Open, FileAccess.ReadWrite))
+        {
+            var prevTime = fileToDo.localTime;
+            var r = fileToDo.setter(file, cmd.Offset.Value);
+            if (r)
+            {
+                fileToDo.localTime += cmd.Offset.Value;
+                if (cmd.Pattern == "") Console.WriteLine("\"{0}\": {1:yyyy.MM.dd - HH.mm.ss}, corrected from {2:yyyy.MM.dd - HH.mm.ss}", Path.GetFileName(fileToDo.fn), fileToDo.localTime, prevTime);
+            }
+        }
     }
 
-    class PatternPart
+
+
+    static void RenameFile(CommandLine cmd, FileToDo fileToDo)
     {
-        public PartGenerator generator;
-        public MatchFunction matcher;
-        public string pattern;
+        // Attempt to match the existing filename against the pattern
+        var basefn = Path.GetFileNameWithoutExtension(fileToDo.fn);
+        var matchremainder = basefn;
+        var matchParts = new LinkedList<PatternPart>(cmd.PatternParts);
+        var matchExt = cmd.PatternExt ?? Path.GetExtension(fileToDo.fn);
+
+        while (matchParts.Count > 0 && matchremainder.Length > 0)
+        {
+            var matchPart = matchParts.First.Value;
+            var matchLength = matchPart.matcher(matchremainder);
+            if (matchLength == -1) break;
+            matchParts.RemoveFirst();
+            if (matchPart.pattern == "%{fn}") basefn = matchremainder.Substring(0, matchLength);
+            matchremainder = matchremainder.Substring(matchLength);
+        }
+
+        if (matchremainder.Length == 0 && matchParts.Count == 2 && matchParts.First.Value.pattern == " - " && matchParts.Last.Value.pattern == "%{place}")
+        {
+            // hack if you had pattern like "%{year} - %{fn} - %{place}" so
+            // it will match a filename like "2012 - file.jpg" which lacks a place
+            matchParts.Clear();
+        }
+
+        if (matchParts.Count != 0 || matchremainder.Length > 0)
+        {
+            // failed to do a complete match
+            basefn = Path.GetFileNameWithoutExtension(fileToDo.fn);
+        }
+
+        // Figure out the new filename
+        var newfn = Path.GetDirectoryName(fileToDo.fn) + "\\";
+        foreach (var patternPart in cmd.PatternParts)
+        {
+            newfn += patternPart.generator(basefn, fileToDo.localTime, fileToDo.place);
+        }
+        if (cmd.PatternParts.Count > 2 && cmd.PatternParts.Last.Value.pattern == "%{place}" && cmd.PatternParts.Last.Previous.Value.pattern == " - " && String.IsNullOrEmpty(fileToDo.place))
+        {
+            if (newfn.EndsWith(" - ")) newfn = newfn.Substring(0, newfn.Length - 3);
+        }
+        newfn += matchExt;
+        if (fileToDo.fn != newfn)
+        {
+            if (File.Exists(newfn)) { Console.WriteLine("Already exists - " + Path.GetFileName(newfn)); return; }
+            Console.WriteLine(Path.GetFileName(newfn));
+            File.Move(fileToDo.fn, newfn);
+        }
     }
 
-    class FileToDo
+
+    static HttpClient http;
+    static string Gps(double latitude, double longitude)
     {
-        // (1) Upon first creation, FileToDo merely has "fn"
-        // (2) After initial scan, it also has "localTime, setter, gpsCoordinates"
-        // This information might be enough for the program to complete its work on this file.
-        // (3) If not, then the file gets stored in a "to-gps" queue.
-        // After gps results are back, then gpsResult is populated
-        public string fn;
+        if (http == null) { http = new HttpClient(); http.DefaultRequestHeaders.Add("User-Agent", "FixCameraDate"); }
 
-        public bool hasInitialScan;
-        public DateTime localTime;
-        public UpdateTimeFunc setter;
-        public GpsCoordinates gpsCoordinates;
+        // 1. Make the request
+        var url = $"http://nominatim.openstreetmap.org/reverse?accept-language=en&format=xml&lat={latitude:0.000000}&lon={longitude:0.000000}&zoom=18";
+        var raw = http.GetStringAsync(url).GetAwaiter().GetResult();
+        var xml = XDocument.Parse(raw);
 
-        public string hasGpsResult;
+        // 2. Parse the response
+        var result = xml.Descendants("result").FirstOrDefault()?.Attribute("ref")?.Value;
+        var road = xml.Descendants("road").FirstOrDefault()?.Value;
+        var neighbourhood = xml.Descendants("neighbourhood").FirstOrDefault()?.Value;
+        var suburb = xml.Descendants("suburb").FirstOrDefault()?.Value;
+        var city = xml.Descendants("city").FirstOrDefault()?.Value;
+        var county = xml.Descendants("county").FirstOrDefault()?.Value;
+        var state = xml.Descendants("state").FirstOrDefault()?.Value;
+        var country = xml.Descendants("country").FirstOrDefault()?.Value;
+
+        // 3. Assemble these into a name
+        var parts = new List<string>();
+        if (result != null) parts.Add(result); else if (road != null) parts.Add(road);
+        if (suburb != null) parts.Add(suburb); else if (neighbourhood != null) parts.Add(neighbourhood);
+        if (city != null) parts.Add(city); else if (county != null) parts.Add(county);
+        if (country == "United States of America" || country == "United Kingdom") parts.Add(state); else parts.Add(country);
+        int pi = 1; while (pi < parts.Count - 1)
+        {
+            if (parts.Take(pi).Any(s => s.Contains(parts[pi]))) parts.RemoveAt(pi);
+            else pi += 1;
+        }
+
+        // 4. Sanitize
+        var r = string.Join(", ", parts);
+        foreach (var disallowed in new[] { '/', '\\', '?', '%', '*', '?', ':', '|', '"', '<', '>', '.', '-' })
+        {
+            r = r.Replace(disallowed, ' ');
+        }
+        r = r.Replace("  ", " ");
+        return r;
     }
 
 
-    static Tuple<DateTimeKind?, UpdateTimeFunc, GpsCoordinates> MetadataTimeAndGps(string fn)
+    static readonly Tuple<DateTimeOffset2?, UpdateTimeFunc, GpsCoordinates> EmptyResult = new Tuple<DateTimeOffset2?, UpdateTimeFunc, GpsCoordinates>(null, (s, t) => false, null);
+
+    static Tuple<DateTimeOffset2?, UpdateTimeFunc, GpsCoordinates> MetadataTimeAndGps(string fn)
     {
         using (var file = new FileStream(fn, FileMode.Open, FileAccess.Read))
         {
@@ -474,20 +438,20 @@ static partial class Program
     }
 
 
-    static Tuple<DateTimeKind, UpdateTimeFunc> FilestampTime(string fn)
+    static Tuple<DateTimeOffset2, UpdateTimeFunc> FilestampTime(string fn)
     {
         var creationTime = File.GetCreationTime(fn);
         var writeTime = File.GetLastWriteTime(fn);
         var winnerTime = creationTime;
         if (writeTime < winnerTime) winnerTime = writeTime;
-        var localTime = DateTimeKind.Utc(winnerTime.ToUniversalTime()); // Although they're stored in UTC on disk, the APIs give us local - time
+        var localTime = DateTimeOffset2.Utc(winnerTime.ToUniversalTime()); // Although they're stored in UTC on disk, the APIs give us local - time
         //
         // BUG COMPATIBILITY: Filestamp times are never as good as metadata times.
         // Windows Phone doesn't store metadata, but it does use filenames of the form "WP_20131225".
         // If we find that, we'll use it.
         int year = 0, month = 0, day = 0;
         bool hasWpName = false, usedFilenameTime = false;
-        var regex = new System.Text.RegularExpressions.Regex(@"WP_20\d\d\d\d\d\d");
+        var regex = new Regex(@"WP_20\d\d\d\d\d\d");
         if (regex.IsMatch(fn))
         {
             var i = fn.IndexOf("WP_20") + 3;
@@ -505,7 +469,7 @@ static partial class Program
                 }
                 else
                 {
-                    localTime = DateTimeKind.Unspecified(new DateTime(year, month, day, 12, 0, 0, System.DateTimeKind.Unspecified));
+                    localTime = DateTimeOffset2.Unspecified(new DateTime(year, month, day, 12, 0, 0, DateTimeKind.Unspecified));
                     usedFilenameTime = true;
                 }
             }
@@ -531,7 +495,7 @@ static partial class Program
     }
 
 
-    static Tuple<DateTimeKind?, UpdateTimeFunc, GpsCoordinates> ExifTime(Stream file, long start, long fend)
+    static Tuple<DateTimeOffset2?, UpdateTimeFunc, GpsCoordinates> ExifTime(Stream file, long start, long fend)
     {
         DateTime? timeLastModified=null, timeOriginal=null, timeDigitized=null;
         long posLastModified = 0, posOriginal = 0, posDigitized = 0;
@@ -644,7 +608,7 @@ static partial class Program
         if (!winnerTime.HasValue || (timeDigitized.HasValue && timeDigitized.Value < winnerTime.Value)) winnerTime = timeDigitized;
         if (!winnerTime.HasValue || (timeOriginal.HasValue && timeOriginal.Value < winnerTime.Value)) winnerTime = timeOriginal;
         //
-        var winnerTimeOffset = winnerTime.HasValue ? DateTimeKind.Unspecified(winnerTime.Value) : (DateTimeKind?)null;
+        var winnerTimeOffset = winnerTime.HasValue ? DateTimeOffset2.Unspecified(winnerTime.Value) : (DateTimeOffset2?)null;
 
         UpdateTimeFunc lambda = (file2, off) =>
         {
@@ -681,7 +645,7 @@ static partial class Program
     }
 
 
-    static Tuple<DateTimeKind?, UpdateTimeFunc, GpsCoordinates> Mp4Time(Stream file, long start, long fend)
+    static Tuple<DateTimeOffset2?, UpdateTimeFunc, GpsCoordinates> Mp4Time(Stream file, long start, long fend)
     {
         // The file is made up of a sequence of boxes, with a standard way to find size and FourCC "kind" of each.
         // Some box kinds contain a kind-specific blob of binary data. Other box kinds contain a sequence
@@ -742,14 +706,14 @@ static partial class Program
         // Indeed its UI doesn't even let you say what the current UTC time is.
         // I also noticed that my Sony Cybershot gives MajorBrand="MSNV", which isn't used by my iPhone or Canon or WP8.
         // I'm going to guess that all "MSNV" files come from Sony, and all of them have the bug.
-        Func<DateTime, DateTimeKind> makeMvhdTime = (dt) =>
+        Func<DateTime, DateTimeOffset2> makeMvhdTime = (dt) =>
          {
-             if (majorBrand == "MSNV") return DateTimeKind.Unspecified(dt);
-             return DateTimeKind.Utc(dt);
+             if (majorBrand == "MSNV") return DateTimeOffset2.Unspecified(dt);
+             return DateTimeOffset2.Utc(dt);
          };
 
         // The "©day" binary blob consists of 2byte (string-length, big-endian), 2bytes (language-code), string
-        DateTimeKind? dayTime = null;
+        DateTimeOffset2? dayTime = null;
         var cdayStringLen = 0; var cdayString = "";
         if (cdayStart != 0 && cdayEnd - cdayStart > 4)
         {
@@ -761,28 +725,28 @@ static partial class Program
                 var buf = new byte[cdayStringLen];
                 file.Read(buf, 0, cdayStringLen);
                 cdayString = Encoding.ASCII.GetString(buf);
-                DateTimeOffset d; if (DateTimeOffset.TryParse(cdayString, out d)) dayTime = DateTimeKind.Local(d);
+                DateTimeOffset d; if (DateTimeOffset.TryParse(cdayString, out d)) dayTime = DateTimeOffset2.Local(d);
             }
         }
 
         // The "CNTH" binary blob consists of 8bytes of unknown, followed by EXIF data
-        DateTimeKind? cnthTime = null; UpdateTimeFunc cnthLambda = null; GpsCoordinates cnthGps = null;
+        DateTimeOffset2? cnthTime = null; UpdateTimeFunc cnthLambda = null; GpsCoordinates cnthGps = null;
         if (cnthStart != 0 && cnthEnd - cnthStart > 16)
         {
             var exif_ft = ExifTime(file, cnthStart + 8, cnthEnd);
             cnthTime = exif_ft.Item1; cnthLambda = exif_ft.Item2; cnthGps = exif_ft.Item3;
         }
 
-        DateTimeKind? winnerTime = null;
+        DateTimeOffset2? winnerTime = null;
         if (dayTime.HasValue)
         {
-            Debug.Assert(dayTime.Value.dt.Kind == System.DateTimeKind.Local);
+            Debug.Assert(dayTime.Value.dt.Kind == DateTimeKind.Local);
             winnerTime = dayTime;
             // prefer this best of all because it knows local time and timezone
         }
         else if (cnthTime.HasValue)
         {
-            Debug.Assert(cnthTime.Value.dt.Kind == System.DateTimeKind.Unspecified);
+            Debug.Assert(cnthTime.Value.dt.Kind == DateTimeKind.Unspecified);
             winnerTime = cnthTime;
             // this is second-best because it knows local time, just not timezone
         }
@@ -863,8 +827,8 @@ static partial class Program
         me.AddLast(Tuple.Create(arg1, arg2, arg3));
     }
 
-    readonly static DateTime TZERO_1904_UTC = new DateTime(1904, 1, 1, 0, 0, 0, System.DateTimeKind.Utc);
-    readonly static DateTime TZERO_1970_UTC = new DateTime(1970, 1, 1, 0, 0, 0, System.DateTimeKind.Utc);
+    readonly static DateTime TZERO_1904_UTC = new DateTime(1904, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    readonly static DateTime TZERO_1970_UTC = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
     static ushort Read2byte(this Stream f, bool fileIsLittleEndian = false)
     {
@@ -917,7 +881,7 @@ static partial class Program
 
     static void WriteDate(this Stream f, int numBytes, DateTime d, bool fix1970)
     {
-        if (d.Kind != System.DateTimeKind.Utc) throw new ArgumentException("Can only write UTC dates");
+        if (d.Kind != DateTimeKind.Utc) throw new ArgumentException("Can only write UTC dates");
         if (numBytes == 4)
         {
             var secs = (uint)(fix1970 ? d - TZERO_1970_UTC : d - TZERO_1904_UTC).TotalSeconds;
@@ -942,7 +906,42 @@ static partial class Program
 }
 
 
-struct DateTimeKind
+public class CommandLine
+{
+    public string Pattern;
+    public TimeSpan? Offset;
+    public List<string> Fns = new List<string>();
+    //
+    public LinkedList<PatternPart> PatternParts = new LinkedList<PatternPart>(); // derived from Pattern
+    public string PatternExt; // derived from Pattern
+}
+
+public class PatternPart
+{
+    public PartGenerator generator;
+    public MatchFunction matcher;
+    public string pattern;
+}
+
+public delegate string PartGenerator(string fn, DateTime dt, string place);
+public delegate int MatchFunction(string remainder); // -1 for no-match, otherwise is the number of characters gobbled up
+public delegate bool UpdateTimeFunc(Stream stream, TimeSpan off);
+
+class FileToDo
+{
+    public string fn;
+    public DateTime localTime;
+    public UpdateTimeFunc setter;
+    public string place;
+}
+
+public class GpsCoordinates
+{
+    public double Latitude;
+    public double Longitude;
+}
+
+struct DateTimeOffset2
 {
     public DateTime dt;
     public TimeSpan offset;
@@ -951,31 +950,27 @@ struct DateTimeKind
     // (2) Time known to be in some specific timezone: DateTime.Kind=Local, offset gives that timezone
     // (3) Time where nothing about timezone is known: DateTime.Kind=Unspecified, offset=0
 
-    public static DateTimeKind Utc(DateTime d)
+    public static DateTimeOffset2 Utc(DateTime d)
     {
-        var d2 = new DateTime(d.Ticks, System.DateTimeKind.Utc);
-        return new DateTimeKind { dt = d2, offset = default(TimeSpan) };
+        var d2 = new DateTime(d.Ticks, DateTimeKind.Utc);
+        return new DateTimeOffset2 { dt = d2, offset = default(TimeSpan) };
     }
-    public static DateTimeKind Unspecified(DateTime d)
+    public static DateTimeOffset2 Unspecified(DateTime d)
     {
-        var d2 = new DateTime(d.Ticks, System.DateTimeKind.Unspecified);
-        return new DateTimeKind { dt = d2, offset = default(TimeSpan) };
+        var d2 = new DateTime(d.Ticks, DateTimeKind.Unspecified);
+        return new DateTimeOffset2 { dt = d2, offset = default(TimeSpan) };
     }
-    public static DateTimeKind Local(DateTimeOffset d)
+    public static DateTimeOffset2 Local(DateTimeOffset d)
     {
-        var d2 = new DateTime(d.Ticks, System.DateTimeKind.Local);
-        return new DateTimeKind { dt = d2, offset = d.Offset };
+        var d2 = new DateTime(d.Ticks, DateTimeKind.Local);
+        return new DateTimeOffset2 { dt = d2, offset = d.Offset };
     }
 
     public override string ToString()
     {
-        if (dt.Kind == System.DateTimeKind.Utc) return dt.ToString("yyyy:MM:ddTHH:mm:ssZ");
-        else if (dt.Kind == System.DateTimeKind.Unspecified) return dt.ToString("yyyy:MM:dd HH:mm:ss");
-        else if (dt.Kind == System.DateTimeKind.Local) return dt.ToString("yyyy:MM:dd HH:mm:ss") + offset.Hours.ToString("+00;-00") + "00";
+        if (dt.Kind == DateTimeKind.Utc) return dt.ToString("yyyy:MM:ddTHH:mm:ssZ");
+        else if (dt.Kind == DateTimeKind.Unspecified) return dt.ToString("yyyy:MM:dd HH:mm:ss");
+        else if (dt.Kind == DateTimeKind.Local) return dt.ToString("yyyy:MM:dd HH:mm:ss") + offset.Hours.ToString("+00;-00") + "00";
         else throw new Exception("Invalid DateTimeKind");
     }
-
-
 }
-
-

@@ -49,9 +49,6 @@
     <None Include="project.json" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="..\BingMapsKey.cs">
-      <Link>BingMapsKey.cs</Link>
-    </Compile>
     <Compile Include="..\Program.cs">
       <Link>Program.cs</Link>
     </Compile>

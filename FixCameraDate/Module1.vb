@@ -28,10 +28,10 @@
 Module Module1
 
     Sub Main(args As String())
-        Dim cmd = ParseCommandLine(args)
+        Dim cmd = ParseCommandLine(args) : If cmd Is Nothing Then Return
 
         For Each fn In cmd.Fns
-            Dim fileToDo = GetMetadata(fn)
+            Dim fileToDo = GetMetadata(fn) : If fileToDo Is Nothing Then Continue For
             If cmd.Pattern = "" AndAlso Not cmd.Offset.HasValue Then Console.WriteLine($"""{IO.Path.GetFileName(fileToDo.fn)}"": {fileToDo.localTime:yyyy.MM.dd - HH.mm.ss} - {fileToDo.place}")
             If cmd.Offset.HasValue Then ModifyTimestamp(cmd, fileToDo)
             If cmd.Pattern <> "" Then RenameFile(cmd, fileToDo)
@@ -147,12 +147,13 @@ Module Module1
             Return Nothing
         End If
 
+        If String.IsNullOrEmpty(r.Pattern) Then Return r
 
         ' Filename heuristics:
         ' (1) If the user omitted an extension from the rename string, then we re-use the one that was given to us
         ' (2) If the filename already matched our datetime format, then we figure out what was the base filename
         If Not r.Pattern.Contains("%{fn}") Then Console.WriteLine("Please include %{fn} in the pattern") : Return Nothing
-        If r.Pattern.Contains("\") Then Console.WriteLine("Folders not allowed in pattern") : Return Nothing
+        If r.Pattern.Contains("\") OrElse r.Pattern.Contains("/") Then Console.WriteLine("Folders not allowed in pattern") : Return Nothing
         If r.Pattern.Split({"%{fn}"}, StringSplitOptions.None).Length <> 2 Then Console.WriteLine("Please include %{fn} only once in the pattern") : Return Nothing
         '
         ' 1. Extract out the extension
@@ -245,8 +246,6 @@ Module Module1
         ' up to the remainder of the original filename
         Dim lastPart = r.PatternParts.Last.Value
         If lastPart.matcher Is Nothing Then lastPart.matcher = Function(rr) rr.Length
-
-
 
         Return r
     End Function
@@ -350,7 +349,7 @@ Module Module1
 
     Function Gps(latitude As Double, longitude As Double) As String
         Static Dim http As Net.Http.HttpClient
-        If http Is Nothing Then http = New Net.Http.HttpClient : http.DefaultRequestHeaders.Add("User-Agent", "TestReverseGeocoding")
+        If http Is Nothing Then http = New Net.Http.HttpClient : http.DefaultRequestHeaders.Add("User-Agent", "FixCameraDate")
 
         ' 1. Make the request
         Dim url = $"http://nominatim.openstreetmap.org/reverse?accept-language=en&format=xml&lat={latitude:0.000000}&lon={longitude:0.000000}&zoom=18"
