@@ -44,8 +44,7 @@ static partial class Program
 
         var tOSM = OpenStreetMapSearch(q);
         var tGoog = GooglePlacesSearch(q);
-        var tBingLoc = BingLocationsSearch(q);
-        var tBingSpat = BingSpatialSearch(q);
+        var tBing = BingMapsSearch(q);
 
         foreach (var i in q)
         {
@@ -59,8 +58,7 @@ static partial class Program
         Console.WriteLine($"TIMES");
         Console.WriteLine($"   OSM:      {tOSM.TotalMilliseconds/q.Length:0}ms/query");
         Console.WriteLine($"   Goog:     {tGoog.TotalMilliseconds/q.Length:0}ms/query");
-        Console.WriteLine($"   BingLoc:  {tBingLoc.TotalMilliseconds/q.Length:0}ms/query");
-        Console.WriteLine($"   BingSpat: {tBingSpat.TotalMilliseconds/q.Length:0}ms/query");
+        Console.WriteLine($"   Bing:     {tBing.TotalMilliseconds/q.Length:0}ms/query");
     }
 
 
@@ -190,131 +188,141 @@ static partial class Program
     }
 
 
-    static TimeSpan BingLocationsSearch(IList<WorkItem> q)
+    static TimeSpan BingMapsSearch(IList<WorkItem> q)
     {
         // Bing Locations API: https://msdn.microsoft.com/en-us/library/ff701710.aspx
-        // This is for geocoding and reverse geocoding. It'd doesn't do
-        // PointsOfInterest.
-        // (There's also another more complicated form of the API that's for submitting
+        // This is for geocoding and reverse geocoding, but doesn't do Points Of Interest.
+        // (There's also another more complicated form of the Locations API that's for submitting
         // a load of requests in a single batch: https://msdn.microsoft.com/en-us/library/ff701733.aspx)
-
-        if (string.IsNullOrEmpty(BingMapsKey)) throw new Exception("Please recompile with a valid Bing Maps Key");
-        Console.Write("Bing Locations");
-        var http = new HttpClient();
-        var re1 = new System.Text.RegularExpressions.Regex(@"^(\d+ )");
-        var re2 = new System.Text.RegularExpressions.Regex(@"( \d+)$");
-        var sw = Stopwatch.StartNew();
-
-        for (int i = 0; i < q.Count; i++)
-        {
-            // 1. Make the web request. Bizzarely, Bing refuses to give both Address
-            // and Neighborhood in the same query, so we have to make two queries.
-            Console.Write(".");
-            var url1 = $"http://dev.virtualearth.net/REST/v1/Locations/{q[i].Latitude:0.000000},{q[i].Longitude:0.000000}?includeEntityTypes=Address&includeNeighborhood=1&o=xml&key={BingMapsKey}";
-            var raw1 = http.GetStringAsync(url1).GetAwaiter().GetResult();
-            var xml1 = XDocument.Parse(raw1);
-            var url2 = $"http://dev.virtualearth.net/REST/v1/Locations/{q[i].Latitude:0.000000},{q[i].Longitude:0.000000}?includeEntityTypes=Neighborhood,PopulatedPlace,AdminDivision1,AdminDivision2,CountryRegion&includeNeighborhood=1&o=xml&key={BingMapsKey}";
-            var raw2 = http.GetStringAsync(url2).GetAwaiter().GetResult();
-            var xml2 = XDocument.Parse(raw2);
-            var xml = new XElement("BothResult", xml1.Root, xml2.Root);
-            // 2. Parse the results. I'm just munging both results and picking the first of each descendent.
-            var address = xml.Descendants(XName.Get("AddressLine", "http://schemas.microsoft.com/search/local/ws/rest/v1")).FirstOrDefault()?.Value;
-            var adminDistrict = xml.Descendants(XName.Get("AdminDistrict", "http://schemas.microsoft.com/search/local/ws/rest/v1")).FirstOrDefault()?.Value;
-            var adminDistrict2 = xml.Descendants(XName.Get("AdminDistrict2", "http://schemas.microsoft.com/search/local/ws/rest/v1")).FirstOrDefault()?.Value;
-            var countryRegion = xml.Descendants(XName.Get("CountryRegion", "http://schemas.microsoft.com/search/local/ws/rest/v1")).FirstOrDefault()?.Value;
-            var locality = xml.Descendants(XName.Get("Locality", "http://schemas.microsoft.com/search/local/ws/rest/v1")).FirstOrDefault()?.Value;
-            var neighborhood = xml.Descendants(XName.Get("Neighborhood", "http://schemas.microsoft.com/search/local/ws/rest/v1")).FirstOrDefault()?.Value;
-            // 3. Clean up address. "24th Ave E & Boyer" is good. "2322 26th Ave E" is too specific.
-            // "Street" is useless. "Piazza di Trevi" is essentially.
-            if (address != null)
-            {
-                int numStart = re1.Match(address).Length, numEnd = re2.Match(address).Length;
-                address = address.Substring(numStart, address.Length - numStart - numEnd);
-                if (address == "Street") address = null;
-            }
-            // 4. Reassemble the parts into a whole
-            var parts = new List<string>();
-            if (address != null) parts.Add(address);
-            if (neighborhood != null) parts.Add(neighborhood);
-            if (locality != null) parts.Add(locality);
-            else if (adminDistrict2 != null) parts.Add(adminDistrict2);
-            if (countryRegion == "United States" || countryRegion == "United Kingdom") parts.Add(adminDistrict);
-            else parts.Add(countryRegion);
-            int pi = 1; while (pi < parts.Count - 1)
-            {
-                if (parts.Take(pi).Any(s => s.Contains(parts[pi]))) parts.RemoveAt(pi);
-                else pi += 1;
-            }
-            q[i].BingLocationResult = string.Join(", ", parts);
-        }
-        sw.Stop();
-        Console.WriteLine();
-        return sw.Elapsed;
-    }
-
-
-    static TimeSpan BingSpatialSearch(IList<WorkItem> q)
-    {
+        //
+        //
         // Bing Spatial API, Query by Area: https://msdn.microsoft.com/en-us/library/gg585133.aspx
         // The Spatial API is solely for Points of Interest.
         // It only has databases for North America and Europe - the rest
         // of the world isn't available.
+        //
+        //
+        // This function does concurrent calls to both APIs.
+
 
         if (string.IsNullOrEmpty(BingMapsKey)) throw new Exception("Please recompile with a valid Bing Maps Key");
-        Console.Write("Bing Spatial  ");
+        Console.Write("Bing Locations+Spatial");
         var http = new HttpClient();
+        var sw = Stopwatch.StartNew();
+
+        // Locations:
+        var re1 = new System.Text.RegularExpressions.Regex(@"^(\d+ )");
+        var re2 = new System.Text.RegularExpressions.Regex(@"( \d+)$");
+        // Spatial:
         var x_Name = XName.Get("entry", "http://www.w3.org/2005/Atom");
         var x_Distance = XName.Get("__Distance", "http://schemas.microsoft.com/ado/2007/08/dataservices");
         var x_Properties = XName.Get("properties", "http://schemas.microsoft.com/ado/2007/08/dataservices/metadata");
 
-        var sw = Stopwatch.StartNew();
-        for (var i = 0; i < q.Count; i++)
+        for (int i = 0; i < q.Count; i++)
         {
-            // 1. Make the web request. Bing Spatial has one REST API for North America POIs,
-            // and another for European POIs, and we don't a priori know which, so we query both.
             Console.Write(".");
-            var url1 = $"http://spatial.virtualearth.net/REST/v1/data/f22876ec257b474b82fe2ffcb8393150/NavteqNA/NavteqPOIs?spatialFilter=nearby({q[i].Latitude:0.000000},{q[i].Longitude:0.000000},1.0)&$select=*,__Distance&$top=3&key={BingMapsKey}";
-            var raw1 = http.GetStringAsync(url1).GetAwaiter().GetResult();
-            var xml1 = XDocument.Parse(raw1);
-            var url2 = $"http://spatial.virtualearth.net/REST/v1/data/c2ae584bbccc4916a0acf75d1e6947b4/NavteqEU/NavteqPOIs?spatialFilter=nearby({q[i].Latitude:0.000000},{q[i].Longitude:0.000000},1.0)&$select=*,__Distance&$top=3&key={BingMapsKey}";
-            var raw2 = http.GetStringAsync(url2).GetAwaiter().GetResult();
-            var xml2 = XDocument.Parse(raw2);
-            var xml = new XElement("BothResult", xml1.Root, xml2.Root);
+
+            // 1. Make the web requests concurrently.
+            //
+            // Locations: Bizzarely, Bing refuses to give both Address and Neighborhood in the
+            // same query, so we have to make two queries.
+            var urlL1 = $"http://dev.virtualearth.net/REST/v1/Locations/{q[i].Latitude:0.000000},{q[i].Longitude:0.000000}?includeEntityTypes=Address&includeNeighborhood=1&o=xml&key={BingMapsKey}";
+            var rawL1Task = http.GetStringAsync(urlL1);
+            var urlL2 = $"http://dev.virtualearth.net/REST/v1/Locations/{q[i].Latitude:0.000000},{q[i].Longitude:0.000000}?includeEntityTypes=Neighborhood,PopulatedPlace,AdminDivision1,AdminDivision2,CountryRegion&includeNeighborhood=1&o=xml&key={BingMapsKey}";
+            var rawL2Task = http.GetStringAsync(urlL2);
+            //
+            // Spatial: Bing Spatial has one REST API for North America POIs,
+            // and another for European POIs, and we don't a priori know which, so we query both.
+            // Maybe I could have made a simple cut based on longitude, but I don't know if
+            // EU includes things like the Falklands Islands which would make this hard
+            var urlS1 = $"http://spatial.virtualearth.net/REST/v1/data/f22876ec257b474b82fe2ffcb8393150/NavteqNA/NavteqPOIs?spatialFilter=nearby({q[i].Latitude:0.000000},{q[i].Longitude:0.000000},1.0)&$select=*,__Distance&$top=3&key={BingMapsKey}";
+            var rawS1Task = http.GetStringAsync(urlS1);
+            var urlS2 = $"http://spatial.virtualearth.net/REST/v1/data/c2ae584bbccc4916a0acf75d1e6947b4/NavteqEU/NavteqPOIs?spatialFilter=nearby({q[i].Latitude:0.000000},{q[i].Longitude:0.000000},1.0)&$select=*,__Distance&$top=3&key={BingMapsKey}";
+            var urlS2Task = http.GetStringAsync(urlS2);
+            //
+            // Async: let's gather all those concurrent tasks together
+            var rawL1 = rawL1Task.GetAwaiter().GetResult();
+            var rawL2 = rawL2Task.GetAwaiter().GetResult();
+            var rawS1 = rawS1Task.GetAwaiter().GetResult();
+            var rawS2 = urlS2Task.GetAwaiter().GetResult();
+
+
+            // LOCATIONS:
+            var xmlL1 = XDocument.Parse(rawL1);
+            var xmlL2 = XDocument.Parse(rawL2);
+            var xmlL = new XElement("BothLocationsResults", xmlL1.Root, xmlL2.Root);
+            // 2. Parse the results. I'm just munging both results and picking the first of each descendent.
+            var addressL = xmlL.Descendants(XName.Get("AddressLine", "http://schemas.microsoft.com/search/local/ws/rest/v1")).FirstOrDefault()?.Value;
+            var adminDistrictL = xmlL.Descendants(XName.Get("AdminDistrict", "http://schemas.microsoft.com/search/local/ws/rest/v1")).FirstOrDefault()?.Value;
+            var adminDistrict2L = xmlL.Descendants(XName.Get("AdminDistrict2", "http://schemas.microsoft.com/search/local/ws/rest/v1")).FirstOrDefault()?.Value;
+            var countryRegionL = xmlL.Descendants(XName.Get("CountryRegion", "http://schemas.microsoft.com/search/local/ws/rest/v1")).FirstOrDefault()?.Value;
+            var localityL = xmlL.Descendants(XName.Get("Locality", "http://schemas.microsoft.com/search/local/ws/rest/v1")).FirstOrDefault()?.Value;
+            var neighborhoodL = xmlL.Descendants(XName.Get("Neighborhood", "http://schemas.microsoft.com/search/local/ws/rest/v1")).FirstOrDefault()?.Value;
+            // 3. Clean up address. "24th Ave E & Boyer" is good. "2322 26th Ave E" is too specific.
+            // "Street" is useless. "Piazza di Trevi" is essentially.
+            if (addressL != null)
+            {
+                int numStart = re1.Match(addressL).Length, numEnd = re2.Match(addressL).Length;
+                addressL = addressL.Substring(numStart, addressL.Length - numStart - numEnd);
+                if (addressL == "Street") addressL = null;
+            }
+            // 4. Reassemble the parts into a whole
+            var partsL = new List<string>();
+            if (addressL != null) partsL.Add(addressL);
+            if (neighborhoodL != null) partsL.Add(neighborhoodL);
+            if (localityL != null) partsL.Add(localityL);
+            else if (adminDistrict2L != null) partsL.Add(adminDistrict2L);
+            if (countryRegionL == "United States" || countryRegionL == "United Kingdom") partsL.Add(adminDistrictL);
+            else partsL.Add(countryRegionL);
+            int pi = 1; while (pi < partsL.Count - 1)
+            {
+                if (partsL.Take(pi).Any(s => s.Contains(partsL[pi]))) partsL.RemoveAt(pi);
+                else pi += 1;
+            }
+            q[i].BingLocationResult = string.Join(", ", partsL);
+
+
+            // SPATIAL:
+            var xmlS1 = XDocument.Parse(rawS1);
+            var xmlS2 = XDocument.Parse(rawS2);
+            var xmlS = new XElement("BothSpatialResults", xmlS1.Root, xmlS2.Root);
             // 2. Pick the best result, so long as it's within 150m, and parse it
             // Note that these results give no neighborhood. Also their CountryRegion is in code
             // e.g. "USA/GBR/FRA/ITA", so I'm omitting that.
-            var result = xml.Descendants(x_Name)
-                                .Select((e) =>
-                                {
-                                    var props = e.Descendants(x_Properties).FirstOrDefault();
-                                    var distance = e.Descendants(x_Distance).FirstOrDefault()?.Value;
-                                    var d = distance == null ? 999.0 : double.Parse(distance);
-                                    return new { props = props, distance = d };
-                                })
-                                .Where(pd => pd.distance < 0.15)
-                                .OrderBy(pd => pd.distance)
-                                .Select(pd => pd.props)
-                                .FirstOrDefault();
-            if (result == null) { q[i].BingSpatialResult = "<unmapped>"; continue; }
-            var name = result.Descendants(XName.Get("DisplayName", "http://schemas.microsoft.com/ado/2007/08/dataservices")).FirstOrDefault()?.Value;
-            var locality = result.Descendants(XName.Get("Locality", "http://schemas.microsoft.com/ado/2007/08/dataservices")).FirstOrDefault()?.Value;
-            var adminDistrict = result.Descendants(XName.Get("AdminDistrict", "http://schemas.microsoft.com/ado/2007/08/dataservices")).FirstOrDefault()?.Value;
+            var resultS = xmlS.Descendants(x_Name)
+                              .Select((e) =>
+                               {
+                                   var props = e.Descendants(x_Properties).FirstOrDefault();
+                                   var distance = e.Descendants(x_Distance).FirstOrDefault()?.Value;
+                                   var d = distance == null ? 999.0 : double.Parse(distance);
+                                   return new { props = props, distance = d };
+                               })
+                               .Where(pd => pd.distance < 0.15)
+                               .OrderBy(pd => pd.distance)
+                               .Select(pd => pd.props)
+                               .FirstOrDefault();
+            if (resultS == null) { q[i].BingSpatialResult = "<unmapped>"; continue; }
+            var nameS = resultS.Descendants(XName.Get("DisplayName", "http://schemas.microsoft.com/ado/2007/08/dataservices")).FirstOrDefault()?.Value;
+            var localityS = resultS.Descendants(XName.Get("Locality", "http://schemas.microsoft.com/ado/2007/08/dataservices")).FirstOrDefault()?.Value;
+            var adminDistrictS = resultS.Descendants(XName.Get("AdminDistrict", "http://schemas.microsoft.com/ado/2007/08/dataservices")).FirstOrDefault()?.Value;
             // 4. Reassemble the parts into a whole
-            var parts = new List<string>();
-            if (name != null) parts.Add(name);
-            if (locality != null) parts.Add(locality);
-            if (adminDistrict != null) parts.Add(adminDistrict);
-            int pi = 1; while (pi < parts.Count - 1)
+            var partsS = new List<string>();
+            if (nameS != null) partsS.Add(nameS);
+            if (localityS != null) partsS.Add(localityS);
+            if (adminDistrictS != null) partsS.Add(adminDistrictS);
+            pi = 1; while (pi < partsS.Count - 1)
             {
-                if (parts.Take(pi).Any(s => s.Contains(parts[pi]))) parts.RemoveAt(pi);
+                if (partsS.Take(pi).Any(s => s.Contains(partsS[pi]))) partsS.RemoveAt(pi);
                 else pi += 1;
             }
-            q[i].BingSpatialResult = string.Join(", ", parts);
+            q[i].BingSpatialResult = string.Join(", ", partsS);
+
         }
         sw.Stop();
         Console.WriteLine();
         return sw.Elapsed;
     }
+
 }
 
 
