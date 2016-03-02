@@ -271,7 +271,7 @@ static class Program
         // The last part, if it was %{fn} or %{place} will match
         // up to the remainder of the original filename
         var lastPart = patternParts.Last.Value;
-        if (lastPart.matcher != null) lastPart.matcher = (rr) => rr.Length;
+        if (lastPart.matcher == null) lastPart.matcher = (rr) => rr.Length;
 
         return Tuple.Create(patternParts, patternExt);
     }
