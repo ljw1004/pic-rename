@@ -126,7 +126,8 @@ static class Program
                 }
                 else
                 {
-                    if (File.Exists(cmd)) { r.Fns = r.Fns ?? new List<string>(); r.Fns.Add(cmd); }
+                    r.Fns = r.Fns ?? new List<string>(); 
+                    if (File.Exists(cmd)) r.Fns.Add(cmd);
                     else Console.WriteLine($"Not found - \"{cmd}\"");
                 }
             }
@@ -383,7 +384,11 @@ static class Program
             if (newfn.EndsWith(" - ")) newfn = newfn.Substring(0, newfn.Length - 3);
         }
         newfn += matchExt;
-        if (fileToDo.fn != newfn)
+        if (fileToDo.fn == newfn)
+        {
+            Console.WriteLine($"[unchanged] {Path.GetFileName(newfn)}");
+        }
+        else
         {
             if (File.Exists(newfn)) { Console.WriteLine("Already exists - " + Path.GetFileName(newfn)); return; }
             Console.WriteLine(Path.GetFileName(newfn));
@@ -821,7 +826,9 @@ static class Program
         if (size != 1)
         {
             if (pos + size > fend) return false;
-            boxKind = kind; payloadStart = pos + 8; payloadEnd = payloadStart + size - 8; return true;
+            if (size == 0) return false;
+            boxKind = kind; payloadStart = pos + 8; payloadEnd = payloadStart + size - 8;
+            return true;
         }
         if (size == 1 && pos + 16 <= fend)
         {
@@ -829,6 +836,7 @@ static class Program
             f.Read(b, 0, 8); if (BitConverter.IsLittleEndian) Array.Reverse(b);
             var size2 = (long)BitConverter.ToUInt64(b, 0);
             if (pos + size2 > fend) return false;
+            if (size2 == 0) return false;
             boxKind = kind; payloadStart = pos + 16; payloadEnd = payloadStart + size2 - 16; return true;
         }
         return false;
