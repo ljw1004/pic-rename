@@ -107,7 +107,7 @@ Module Module1
                 r.Offset = r.Offset + mkts(num)
 
             ElseIf cmd = "/?" OrElse cmd = "/help" OrElse cmd = "-help" OrElse cmd = "--help" Then
-                r.Fns.Clear() : Exit While
+                r.Fns = Nothing : Exit While
 
             ElseIf cmd.StartsWith("-") Then
                 ' unknown option, so error out
@@ -122,9 +122,11 @@ Module Module1
                     If globPath = "" Then globPath = IO.Directory.GetCurrentDirectory()
                     Dim fns = IO.Directory.GetFiles(globPath, globMatch)
                     If fns.Length = 0 Then Console.WriteLine($"Not found - ""{cmd}""")
+                    r.Fns = If(r.Fns, New List(Of String))
                     r.Fns.AddRange(fns)
                 Else
                     If IO.File.Exists(cmd) Then
+                        r.Fns = If(r.Fns, New List(Of String))
                         r.Fns.Add(cmd)
                     Else
                         Console.WriteLine($"Not found - ""{cmd}""")
@@ -133,7 +135,7 @@ Module Module1
             End If
         End While
 
-        If r.Fns.Count = 0 Then
+        If r.Fns Is Nothing Then
             Console.WriteLine("FixCameraDate ""a.jpg"" ""b.jpg"" [-rename [""pattern""]] [-day+n] [-hour+n] [-minute+n]")
             Console.WriteLine("  Filename can include * and ? wildcards")
             Console.WriteLine("  -rename: pattern defaults to ""%{datetime} - %{fn} - %{place}"" and")
@@ -147,21 +149,30 @@ Module Module1
             Return Nothing
         End If
 
-        If String.IsNullOrEmpty(r.Pattern) Then Return r
+        If Not String.IsNullOrEmpty(r.Pattern) Then
+            Dim tt = CompilePattern(r.Pattern) : If tt Is Nothing Then Return Nothing
+            r.PatternParts = tt.Item1 : r.PatternExt = tt.Item2
+        End If
 
+        Return r
+    End Function
+
+
+    Function CompilePattern(pattern As String) As Tuple(Of LinkedList(Of PatternPart), String)
         ' Filename heuristics:
         ' (1) If the user omitted an extension from the rename string, then we re-use the one that was given to us
         ' (2) If the filename already matched our datetime format, then we figure out what was the base filename
-        If Not r.Pattern.Contains("%{fn}") Then Console.WriteLine("Please include %{fn} in the pattern") : Return Nothing
-        If r.Pattern.Contains("\") OrElse r.Pattern.Contains("/") Then Console.WriteLine("Folders not allowed in pattern") : Return Nothing
-        If r.Pattern.Split({"%{fn}"}, StringSplitOptions.None).Length <> 2 Then Console.WriteLine("Please include %{fn} only once in the pattern") : Return Nothing
+        If Not pattern.Contains("%{fn}") Then Console.WriteLine("Please include %{fn} in the pattern") : Return Nothing
+        If pattern.Contains("\") OrElse pattern.Contains("/") Then Console.WriteLine("Folders not allowed in pattern") : Return Nothing
+        If pattern.Split({"%{fn}"}, StringSplitOptions.None).Length <> 2 Then Console.WriteLine("Please include %{fn} only once in the pattern") : Return Nothing
+
+        Dim patternExt As String = Nothing
+        Dim patternParts As New LinkedList(Of PatternPart)
         '
         ' 1. Extract out the extension
-        Dim pattern = r.Pattern
-        r.PatternExt = Nothing
         For Each potentialExt In {".jpg", ".mp4", ".mov", ".jpeg"}
             If Not pattern.ToLower.EndsWith(potentialExt) Then Continue For
-            r.PatternExt = pattern.Substring(pattern.Length - potentialExt.Length)
+            patternExt = pattern.Substring(pattern.Length - potentialExt.Length)
             pattern = pattern.Substring(0, pattern.Length - potentialExt.Length)
             Exit For
         Next
@@ -189,7 +200,7 @@ Module Module1
                                    If rr.Substring(0, rsplit.Length) = rsplit Then Return rsplit.Length
                                    Return -1
                                End Function
-                Dim prevPart = r.PatternParts.LastOrDefault
+                Dim prevPart = patternParts.LastOrDefault
                 If prevPart IsNot Nothing AndAlso prevPart.matcher Is Nothing Then
                     prevPart.matcher = Function(rr)
                                            Dim i = rr.IndexOf(rsplit)
@@ -197,21 +208,21 @@ Module Module1
                                            Return i
                                        End Function
                 End If
-                r.PatternParts.AddLast(part)
+                patternParts.AddLast(part)
                 Continue For
             End If
 
             If rsplit.StartsWith("%{fn}") Then
                 part.generator = Function(fn2, dt2, pl2) fn2
                 part.matcher = Nothing ' must be filled in by the next part
-                r.PatternParts.AddLast(part)
+                patternParts.AddLast(part)
                 Continue For
             End If
 
             If rsplit.StartsWith("%{place}") Then
                 part.generator = Function(fn2, dt2, pl2) pl2
                 part.matcher = Nothing ' must be filled in by the next part
-                r.PatternParts.AddLast(part)
+                patternParts.AddLast(part)
                 Continue For
             End If
 
@@ -239,15 +250,15 @@ Module Module1
                                If rr.Substring(0, islike.Length) Like islike Then Return islike.Length
                                Return -1
                            End Function
-            r.PatternParts.AddLast(part)
+            patternParts.AddLast(part)
         Next
 
         ' The last part, if it was %{fn} or %{place} will match
         ' up to the remainder of the original filename
-        Dim lastPart = r.PatternParts.Last.Value
+        Dim lastPart = patternParts.Last.Value
         If lastPart.matcher Is Nothing Then lastPart.matcher = Function(rr) rr.Length
 
-        Return r
+        Return Tuple.Create(patternParts, patternExt)
     End Function
 
 
@@ -809,10 +820,10 @@ End Module
 Class Commandline
     Public Pattern As String
     Public Offset As TimeSpan?
-    Public Fns As New List(Of String)
+    Public Fns As List(Of String)
     '
-    Public PatternParts As New LinkedList(Of PatternPart) ' derived from Pattern
-    Public PatternExt As String ' derived from Pattern
+    Public PatternParts As LinkedList(Of PatternPart) ' compiled from Pattern
+    Public PatternExt As String ' compiled from Pattern
 End Class
 
 Class PatternPart

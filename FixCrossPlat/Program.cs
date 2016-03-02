@@ -102,7 +102,7 @@ static class Program
             }
             else if (cmd == "/?" || cmd == "/help" || cmd == "-help" || cmd == "--help")
             {
-                r.Fns.Clear(); break;
+                r.Fns = null; break;
             }
             else if (cmd.StartsWith("-"))
             {
@@ -120,18 +120,19 @@ static class Program
                     if (globPath == "") globPath = Directory.GetCurrentDirectory();
                     var fns = Directory.GetFiles(globPath, globMatch);
                     if (fns.Length == 0) Console.WriteLine($"Not found - \"{cmd}\"");
+                    r.Fns = r.Fns ?? new List<string>();
                     r.Fns.AddRange(fns);
                 }
                 else
                 {
-                    if (File.Exists(cmd)) r.Fns.Add(cmd);
+                    if (File.Exists(cmd)) { r.Fns = r.Fns ?? new List<string>(); r.Fns.Add(cmd); }
                     else Console.WriteLine($"Not found - \"{cmd}\"");
                 }
             }
         }
 
 
-        if (r.Fns.Count == 0)
+        if (r.Fns == null)
         {
             Console.WriteLine(@"FixCameraDate ""a.jpg"" ""b.jpg"" [-rename [""pattern""]] [-day+n] [-hour+n] [-minute+n]");
             Console.WriteLine(@"  Filename can include * and ? wildcards");
@@ -147,22 +148,35 @@ static class Program
         }
 
 
-        if (string.IsNullOrEmpty(r.Pattern)) return r;
+        if (!string.IsNullOrEmpty(r.Pattern))
+        {
+            var tt = CompilePattern(r.Pattern); if (tt == null) return null;
+            r.PatternParts = tt.Item1; r.PatternExt = tt.Item2;
+        }
 
+        return r;
+    }
+
+
+    static Tuple<LinkedList<PatternPart>,string> CompilePattern(string pattern)
+    {
         // Filename heuristics:
         // (1) If the user omitted an extension from the rename string, then we re-use the one that was given to us
         // (2) If the filename already matched our datetime format, then we figure out what was the base filename
-        if (!r.Pattern.Contains("%{fn}")) { Console.WriteLine("Please include %{fn} in the pattern"); return null; }
-        if (r.Pattern.Contains("\\") || r.Pattern.Contains("/")) { Console.WriteLine("Folders not allowed in pattern"); return null; }
-        if (r.Pattern.Split(new[] { "%{fn}" }, StringSplitOptions.None).Length != 2) { Console.WriteLine("Please include %{fn} only once in the pattern"); return null; }
+        if (!pattern.Contains("%{fn}")) { Console.WriteLine("Please include %{fn} in the pattern"); return null; }
+        if (pattern.Contains("\\") || pattern.Contains("/")) { Console.WriteLine("Folders not allowed in pattern"); return null; }
+        if (pattern.Split(new[] { "%{fn}" }, StringSplitOptions.None).Length != 2) { Console.WriteLine("Please include %{fn} only once in the pattern"); return null; }
+
+        string patternExt = null;
+        var patternParts = new LinkedList<PatternPart>();
+
+
         //
         // 1. Extract out the extension
-        var pattern = r.Pattern;
-        r.PatternExt = null;
         foreach (var potentialExt in new[] { ".jpg", ".mp4", ".mov", ".jpeg" })
         {
             if (!pattern.ToLower().EndsWith(potentialExt)) continue;
-            r.PatternExt = pattern.Substring(pattern.Length - potentialExt.Length);
+            patternExt = pattern.Substring(pattern.Length - potentialExt.Length);
             pattern = pattern.Substring(0, pattern.Length - potentialExt.Length);
             break;
         }
@@ -194,7 +208,7 @@ static class Program
                     if (rr.Substring(0, rsplit.Length) == rsplit) return rsplit.Length;
                     return -1;
                 };
-                var prevPart = r.PatternParts.LastOrDefault();
+                var prevPart = patternParts.LastOrDefault();
                 if (prevPart != null && prevPart.matcher == null)
                 {
                     prevPart.matcher = (rr) =>
@@ -204,7 +218,7 @@ static class Program
                         return i;
                     };
                 }
-                r.PatternParts.AddLast(part);
+                patternParts.AddLast(part);
                 continue;
             }
 
@@ -212,7 +226,7 @@ static class Program
             {
                 part.generator = (fn2, dt2, pl2) => fn2;
                 part.matcher = null; // must be filled in by the next part
-                r.PatternParts.AddLast(part);
+                patternParts.AddLast(part);
                 continue;
             }
 
@@ -220,7 +234,7 @@ static class Program
             {
                 part.generator = (fn2, dt2, pl2) => pl2;
                 part.matcher = null; // must be filled in by the next part
-                r.PatternParts.AddLast(part);
+                patternParts.AddLast(part);
                 continue;
             }
 
@@ -250,17 +264,16 @@ static class Program
                 if (new Regex(regex).IsMatch(rr.Substring(0, fmt.Length))) return fmt.Length;
                 return -1;
             };
-            r.PatternParts.AddLast(part);
+            patternParts.AddLast(part);
         }
 
         // The last part, if it was %{fn} or %{place} will match
         // up to the remainder of the original filename
-        var lastPart = r.PatternParts.Last.Value;
+        var lastPart = patternParts.Last.Value;
         if (lastPart.matcher != null) lastPart.matcher = (rr) => rr.Length;
 
-        return r;
+        return Tuple.Create(patternParts, patternExt);
     }
-
 
     static FileToDo GetMetadata(string fn)
     {
@@ -910,10 +923,10 @@ public class CommandLine
 {
     public string Pattern;
     public TimeSpan? Offset;
-    public List<string> Fns = new List<string>();
+    public List<string> Fns;
     //
-    public LinkedList<PatternPart> PatternParts = new LinkedList<PatternPart>(); // derived from Pattern
-    public string PatternExt; // derived from Pattern
+    public LinkedList<PatternPart> PatternParts; // compiled from Pattern
+    public string PatternExt; // compiled from Pattern
 }
 
 public class PatternPart
