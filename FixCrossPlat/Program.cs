@@ -118,6 +118,7 @@ static class Program
                     string globPath = Path.GetDirectoryName(cmd), globMatch = Path.GetFileName(cmd);
                     if (globPath.Contains("*") || globPath.Contains("?")) { Console.WriteLine("Can't match wildcard directory names"); return null; }
                     if (globPath == "") globPath = Directory.GetCurrentDirectory();
+                    if (!Directory.Exists(globPath)) { Console.WriteLine($"Not found - \"{globPath}\""); return null; }
                     var fns = Directory.GetFiles(globPath, globMatch);
                     if (fns.Length == 0) Console.WriteLine($"Not found - \"{cmd}\"");
                     r.Fns = r.Fns ?? new List<string>();

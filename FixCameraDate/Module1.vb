@@ -120,6 +120,7 @@ Module Module1
                     Dim globPath = IO.Path.GetDirectoryName(cmd), globMatch = IO.Path.GetFileName(cmd)
                     If globPath.Contains("*") OrElse globPath.Contains("?") Then Console.WriteLine("Can't match wildcard directory names") : Return Nothing
                     If globPath = "" Then globPath = IO.Directory.GetCurrentDirectory()
+                    If Not IO.Directory.Exists(globPath) Then Console.WriteLine($"Not found - ""{globPath}""") : Return Nothing
                     Dim fns = IO.Directory.GetFiles(globPath, globMatch)
                     If fns.Length = 0 Then Console.WriteLine($"Not found - ""{cmd}""")
                     r.Fns = If(r.Fns, New List(Of String))
@@ -137,7 +138,7 @@ Module Module1
 
         If r.Fns Is Nothing Then
             Console.WriteLine("FixCameraDate ""a.jpg"" ""b.jpg"" [-rename [""pattern""]] [-day+n] [-hour+n] [-minute+n]")
-            Console.WriteLine("  Filename can include * and ? wildcards")
+            Console.WriteLine("  Filename can include * And ? wildcards")
             Console.WriteLine("  -rename: pattern defaults to ""%{datetime} - %{fn} - %{place}"" and")
             Console.WriteLine("           can include %{datetime,fn,date,time,year,month,day,hour,minute,second,place}")
             Console.WriteLine("  -day,-hour,-minute: adjust the timestamp; can be + or -")
