@@ -340,7 +340,7 @@ Module Module1
         End If
 
         ' Figure out the new filename
-        Dim newfn = IO.Path.GetDirectoryName(fileToDo.fn) & "\"
+        Dim newfn = IO.Path.GetDirectoryName(fileToDo.fn) & IO.Path.DirectorySeparatorChar
         For Each patternPart In cmd.PatternParts
             newfn &= patternPart.generator(basefn, fileToDo.localTime, fileToDo.place)
         Next

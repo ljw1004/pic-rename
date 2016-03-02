@@ -373,7 +373,7 @@ static class Program
         }
 
         // Figure out the new filename
-        var newfn = Path.GetDirectoryName(fileToDo.fn) + "\\";
+        var newfn = Path.GetDirectoryName(fileToDo.fn) + Path.DirectorySeparatorChar;
         foreach (var patternPart in cmd.PatternParts)
         {
             newfn += patternPart.generator(basefn, fileToDo.localTime, fileToDo.place);
