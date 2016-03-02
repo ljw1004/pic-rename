@@ -1,10 +1,43 @@
-﻿Option Strict On
-Imports System.Net.Http
-Imports System.Threading
-Imports <xmlns="http://schemas.microsoft.com/search/local/ws/rest/v1">
+﻿' FixCameraDate, (c) Lucian Wischik
+' ------------------------------------
+
+
+' Goals:
+' (1) If you have shots from one or more devices, rename them to local time+place when the shot was taken
+' (2) If you had taken shots on holiday without having fixed the timezone on your camera, fix their metadata timestamps
+' also...
+' (3) Just display the time+place from a given shot
+
+' METADATA DATES:
+' JPEG:       metadata dates are "unspecified", i.e. local to the time the photo was taken, but without saying which timezone that was
+' MOV-iphone: metadata dates are "local", i.e. local to the time the video was taken, and they do say which timezone
+' MOV-canon:  metadata dates officially are "UTC", but we can also find undocumented the "unspecified" version
+' MP4-sony:   metadata dates claim to be UTC, but in reality they're unspecified, i.e. local to the time the video was taken, and we don't have information about what timezone
+' MP4-android:metadata dates are in UTC as they claim, but have the "year" 66 years in the past
+' MP4-wp8:    metadata dates are absent.
+'
+' FILESTAMP DATES:
+' In all cases, filestamp dates are UTC.
+' In some cases they're the filestamp from when the photo/video was taken and written immediately to SD card
+' In other cases they're the filestamp from when the photo/video was uploaded to Skydrive
+' In other cases they're the filestamp from when the photo/video was last copied to the folder
+
+' Our objective is to rename the file according to "local" time when the photo/video was taken, without the timezone information.
 
 
 Module Module1
+
+    Sub Main(args As String())
+        Dim cmd = ParseCommandLine(args)
+
+        For Each fn In cmd.Fns
+            Dim fileToDo = GetMetadata(fn)
+            If cmd.Pattern = "" AndAlso Not cmd.Offset.HasValue Then Console.WriteLine($"""{IO.Path.GetFileName(fileToDo.fn)}"": {fileToDo.localTime:yyyy.MM.dd - HH.mm.ss} - {fileToDo.place}")
+            If cmd.Offset.HasValue Then ModifyTimestamp(cmd, fileToDo)
+            If cmd.Pattern <> "" Then RenameFile(cmd, fileToDo)
+        Next
+    End Sub
+
 
     Sub TestMetadata()
         Dim fns = IO.Directory.GetFiles("test")
@@ -16,159 +49,38 @@ Module Module1
     End Sub
 
     Sub TestGps()
-        'Sub DoGps(gpsToDo0 As Dictionary(Of Integer, FileToDo), filesToDo As Queue(Of FileToDo))
-        Dim gpsToDo As New Dictionary(Of Integer, FileToDo)
-        Dim filesToDo As New Queue(Of FileToDo)
-        gpsToDo.Add(11, New FileToDo With {.fn = "Montlake", .gpsCoordinates = New GpsCoordinates(47.637922, -122.301557)})
-        gpsToDo.Add(12, New FileToDo With {.fn = "Volunteer Park", .gpsCoordinates = New GpsCoordinates(47.629612, -122.315119)})
-        gpsToDo.Add(13, New FileToDo With {.fn = "Arboretum", .gpsCoordinates = New GpsCoordinates(47.639483, -122.29801)})
-        gpsToDo.Add(14, New FileToDo With {.fn = "Husky Stadium", .gpsCoordinates = New GpsCoordinates(47.65076, -122.302043)})
-        gpsToDo.Add(15, New FileToDo With {.fn = "UW Campus", .gpsCoordinates = New GpsCoordinates(47.656849, -122.309596)})
-        gpsToDo.Add(16, New FileToDo With {.fn = "Ballard", .gpsCoordinates = New GpsCoordinates(47.668719, -122.38296)})
-        gpsToDo.Add(17, New FileToDo With {.fn = "Shilshole", .gpsCoordinates = New GpsCoordinates(47.681006, -122.407513)})
-        gpsToDo.Add(18, New FileToDo With {.fn = "Space needle", .gpsCoordinates = New GpsCoordinates(47.620415, -122.349463)})
-        gpsToDo.Add(19, New FileToDo With {.fn = "Pike Place Market", .gpsCoordinates = New GpsCoordinates(47.609839, -122.342981)})
-        gpsToDo.Add(20, New FileToDo With {.fn = "Chaplains' Court in Old Aberdeen, Scotland", .gpsCoordinates = New GpsCoordinates(57.169365, -2.101216)})
-        gpsToDo.Add(21, New FileToDo With {.fn = "Aberdeen", .gpsCoordinates = New GpsCoordinates(57.14727, -2.095665)})
-        gpsToDo.Add(22, New FileToDo With {.fn = "Lihue", .gpsCoordinates = New GpsCoordinates(21.97472, -159.3656)})
-        gpsToDo.Add(23, New FileToDo With {.fn = "Barking Sands beach in Hawaii", .gpsCoordinates = New GpsCoordinates(22.034308, -159.785638)})
-        gpsToDo.Add(24, New FileToDo With {.fn = "Darra, Brisbane", .gpsCoordinates = New GpsCoordinates(-27.5014, 152.97272)})
-        gpsToDo.Add(25, New FileToDo With {.fn = "Queens' College Cambridge", .gpsCoordinates = New GpsCoordinates(52.196766, 0.12255)})
-        DoGps(gpsToDo, filesToDo)
-        For Each file In filesToDo
-            Console.WriteLine($"{file.fn} ... {file.gpsResult}")
-        Next
+        ' North America
+        Console.WriteLine("Montlake, Seattle - " & Gps(47.637922, -122.301557))
+        Console.WriteLine("Volunteer Park, Seattle - " & Gps(47.629612, -122.315119))
+        Console.WriteLine("Arboretum, Seattle - " & Gps(47.639483, -122.29801))
+        Console.WriteLine("Husky Stadium, Seattle - " & Gps(47.65076, -122.302043))
+        Console.WriteLine("Ballard, Seattle - " & Gps(47.668719, -122.38296))
+        Console.WriteLine("Shilshole Marina, Seattle - " & Gps(47.681006, -122.407513))
+        Console.WriteLine("Space Needle, Seattle - " & Gps(47.620415, -122.349463))
+        Console.WriteLine("Pike Place Market, Seattle - " & Gps(47.609839, -122.342981))
+        Console.WriteLine("UW Campus, Seattle - " & Gps(47.65464, -122.30843))
+        Console.WriteLine("Stuart Island, WA - " & Gps(48.67998, -123.23106))
+        Console.WriteLine("Lihue, Kauai - " & Gps(21.97472, -159.3656))
+        Console.WriteLine("Polihale Beach, Kauai - " & Gps(22.08223, -159.76265))
+        ' Europe
+        Console.WriteLine("Aberdeen, Scotland - " & Gps(57.14727, -2.095665))
+        Console.WriteLine("The Chanonry, Old Aberdeen - " & Gps(57.169365, -2.101216))
+        Console.WriteLine("Queens' College, Cambridge - " & Gps(52.20234, 0.11589))
+        Console.WriteLine("Eiffel Tower, Paris - " & Gps(48.858262, 2.293763))
+        Console.WriteLine("Trevi Fountain, Rome - " & Gps(41.900914, 12.483172))
+        ' Canada
+        Console.WriteLine("Stanley Park, Vancouver - " & Gps(49.31168, -123.14786))
+        Console.WriteLine("Butchart Gardens, Vancouver Island - " & Gps(48.56686, -123.46688))
+        Console.WriteLine("Sidney Island, BC - " & Gps(48.65287, -123.34463))
+        ' Australasia
+        Console.WriteLine("Darra, Brisbane - " & Gps(-27.5014, 152.97272))
+        Console.WriteLine("Sidney Opera House - " & Gps(-33.85733, 151.21516))
+        Console.WriteLine("Taj Mahal, India - " & Gps(27.17409, 78.04171))
+        Console.WriteLine("Forbidden City, Beijing - " & Gps(39.91639, 116.39023))
+        Console.WriteLine("Angkor Wat, Cambodia - " & Gps(13.41111, 103.86234))
     End Sub
 
-    Sub Main(args As String())
-        TestGps() : Return
-        ' Goals:
-        ' (1) If you have shots from one or more devices, rename them to local time when the shot was taken
-        ' (2) If you had taken shots on holiday without having fixed the timezone on your camera, fix their metadata timestamps
-        ' also...
-        ' (3) Just display the time from a given shot
 
-        ' METADATA DATES:
-        ' JPEG:       metadata dates are "unspecified", i.e. local to the time the photo was taken, but without saying which timezone that was
-        ' MOV-iphone: metadata dates are "local", i.e. local to the time the video was taken, and they do say which timezone
-        ' MOV-canon:  metadata dates officially are "UTC", but we can also find undocumented the "unspecified" version
-        ' MP4-sony:   metadata dates claim to be UTC, but in reality they're unspecified, i.e. local to the time the video was taken, and we don't have information about what timezone
-        ' MP4-android:metadata dates are in UTC as they claim, but have the "year" 66 years in the past
-        ' MP4-wp8:    metadata dates are absent.
-        '
-        ' FILESTAMP DATES:
-        ' In all cases, filestamp dates are UTC.
-        ' In some cases they're the filestamp from when the photo/video was taken and written immediately to SD card
-        ' In other cases they're the filestamp from when the photo/video was uploaded to Skydrive
-        ' In other cases they're the filestamp from when the photo/video was last copied to the folder
-
-        ' Our objective is to rename the file according to "local" time when the photo/video was taken, without the timezone information.
-
-        Dim cmd = ParseCommandLine(args)
-
-
-        For Each cmdFn In cmd.Fns
-            Dim fileToDo As New FileToDo With {.fn = cmdFn}
-
-            Dim mtt = MetadataTimeAndGps(fileToDo.fn)
-            Dim ftt = FilestampTime(fileToDo.fn)
-            Dim gps As GpsCoordinates = Nothing
-            If mtt Is Nothing Then Console.WriteLine("Not an image/video - ""{0}""", IO.Path.GetFileName(fileToDo.fn)) : Continue For
-            Dim mt = mtt.Item1, ft = ftt.Item1
-            If mt.HasValue Then
-                fileToDo.setter = mtt.Item2
-                gps = mtt.Item3
-                If mt.Value.dt.Kind = System.DateTimeKind.Unspecified OrElse mt.Value.dt.Kind = System.DateTimeKind.Local Then
-                    ' If dt.kind=Unspecified (e.g. EXIF, Sony), then the time is by assumption already local from when the picture was shot
-                    ' If dt.kind=Local (e.g. iPhone-MOV), then the time is local, and also indicates its timezone offset
-                    fileToDo.localTime = mt.Value.dt
-                ElseIf mt.Value.dt.Kind = System.DateTimeKind.Utc Then
-                    ' If dt.Kind=UTC (e.g. Android), then time is in UTC, and we don't know how to read timezone.
-                    fileToDo.localTime = mt.Value.dt.ToLocalTime() ' Best we can do is guess the timezone of the computer
-                End If
-            Else
-                fileToDo.setter = ftt.Item2
-                If ft.dt.Kind = System.DateTimeKind.Unspecified Then
-                    ' e.g. Windows Phone when we got the date from the filename
-                    fileToDo.localTime = ft.dt
-                ElseIf ft.dt.Kind = System.DateTimeKind.Utc Then
-                    ' e.g. all other files where we got the date from the filestamp
-                    fileToDo.localTime = ft.dt.ToLocalTime() ' the best we can do is guess that the photo was taken in the timezone as this computer now
-                Else
-                    Throw New Exception("Expected filetimes To be In UTC")
-                End If
-            End If
-
-
-            ' The only thing that requires GPS is if (1) we're doing a rename, (2) the
-            ' pattern includes place, (3) the file actually has a GPS signature
-            If cmd.Pattern.Contains("%{place}") AndAlso gps IsNot Nothing Then
-                fileToDo.place = OpenStreetMapSearch(gps.Latitude, gps.Longitude)
-            End If
-
-
-            If cmd.Pattern = "" AndAlso Not cmd.Offset.HasValue Then
-                Console.WriteLine("""{0}"": {1:yyyy.MM.dd - HH.mm.ss}", IO.Path.GetFileName(fileToDo.fn), fileToDo.localTime)
-            End If
-
-
-            If cmd.Offset.HasValue Then
-                Using file = New IO.FileStream(fileToDo.fn, IO.FileMode.Open, IO.FileAccess.ReadWrite)
-                    Dim prevTime = fileToDo.localTime
-                    Dim r = fileToDo.setter(file, cmd.Offset.Value)
-                    If r Then
-                        fileToDo.localTime += cmd.Offset.Value
-                        If cmd.Pattern = "" Then Console.WriteLine("""{0}"": {1:yyyy.MM.dd - HH.mm.ss}, corrected from {2:yyyy.MM.dd - HH.mm.ss}", IO.Path.GetFileName(fileToDo.fn), fileToDo.localTime, prevTime)
-                    End If
-                End Using
-            End If
-
-
-            If cmd.Pattern <> "" Then
-                ' Attempt to match the existing filename against the pattern
-                Dim basefn = IO.Path.GetFileNameWithoutExtension(fileToDo.fn)
-                Dim matchremainder = basefn
-                Dim matchParts As New LinkedList(Of PatternPart)(cmd.PatternParts)
-                Dim matchExt = If(cmd.PatternExt, IO.Path.GetExtension(fileToDo.fn))
-
-                While matchParts.Count > 0 AndAlso matchremainder.Length > 0
-                    Dim matchPart As PatternPart = matchParts.First.Value
-                    Dim matchLength = matchPart.matcher(matchremainder)
-                    If matchLength = -1 Then Exit While
-                    matchParts.RemoveFirst()
-                    If matchPart.pattern = "%{fn}" Then basefn = matchremainder.Substring(0, matchLength)
-                    matchremainder = matchremainder.Substring(matchLength)
-                End While
-
-                If matchremainder.Length = 0 AndAlso matchParts.Count = 2 AndAlso matchParts(0).pattern = " - " AndAlso matchParts(1).pattern = "%{place}" Then
-                    ' hack if you had pattern like "%{year} - %{fn} - %{place}" so
-                    ' it will match a filename like "2012 - file.jpg" which lacks a place
-                    matchParts.Clear()
-                End If
-
-                If matchParts.Count <> 0 OrElse matchremainder.Length > 0 Then
-                    ' failed to do a complete match
-                    basefn = IO.Path.GetFileNameWithoutExtension(fileToDo.fn)
-                End If
-                '
-                ' 4. Figure out the new filename
-                Dim newfn = IO.Path.GetDirectoryName(fileToDo.fn) & "\"
-                For Each patternPart In cmd.PatternParts
-                    newfn &= patternPart.generator(basefn, fileToDo.localTime, fileToDo.place)
-                Next
-                If cmd.PatternParts.Count > 2 AndAlso cmd.PatternParts.Last.Value.pattern = "%{place}" AndAlso patternParts.Last.Previous.Value.pattern = " - " AndAlso String.IsNullOrEmpty(fileToDo.gpsResult) Then
-                    If newfn.EndsWith(" - ") Then newfn = newfn.Substring(0, newfn.Length - 3)
-                End If
-                newfn &= matchExt
-                If fileToDo.fn <> newfn Then
-                    If IO.File.Exists(newfn) Then Console.WriteLine("Already exists - " & IO.Path.GetFileName(newfn)) : Continue While
-                    Console.WriteLine(IO.Path.GetFileName(newfn))
-                    IO.File.Move(fileToDo.fn, newfn)
-                End If
-            End If
-
-        Next
-    End Sub
 
     Function ParseCommandLine(args As String()) As Commandline
         Dim cmdArgs As New LinkedList(Of String)(args)
@@ -339,39 +251,106 @@ Module Module1
         Return r
     End Function
 
-    Class Commandline
-        Public Pattern As String
-        Public Offset As TimeSpan?
-        Public Fns As New List(Of String)
-        '
-        Public PatternParts As New LinkedList(Of PatternPart) ' derived from Pattern
-        Public PatternExt As String ' derived from Pattern
-    End Class
 
-    Class PatternPart
-        Public generator As PartGenerator
-        Public matcher As MatchFunction
-        Public pattern As String
-    End Class
+    Function GetMetadata(fn As String) As FileToDo
+        Dim r As New FileToDo With {.fn = fn}
 
-    Delegate Function PartGenerator(fn As String, dt As DateTime, place As String) As String
-    Delegate Function MatchFunction(remainder As String) As Integer ' -1 for no-match, otherwise is the number of characters gobbled up
-    Delegate Function UpdateTimeFunc(stream As IO.Stream, off As TimeSpan) As Boolean
+        Dim mtt = MetadataTimeAndGps(fn)
+        Dim ftt = FilestampTime(fn)
+        If mtt Is Nothing Then Console.WriteLine("Not an image/video - ""{0}""", IO.Path.GetFileName(fn)) : Return Nothing
 
-    ReadOnly EmptyResult As New Tuple(Of DateTimeOffset2?, UpdateTimeFunc, GpsCoordinates)(Nothing, Function() False, Nothing)
+        Dim mt = mtt.Item1, ft = ftt.Item1
+        If mt.HasValue Then
+            r.setter = mtt.Item2
+            If mtt.Item3 IsNot Nothing Then r.place = Gps(mtt.Item3.Latitude, mtt.Item3.Longitude)
 
-    Class FileToDo
-        Public fn As String
-        Public localTime As DateTime
-        Public setter As UpdateTimeFunc
-        Public place As String
-    End Class
+            If mt.Value.dt.Kind = System.DateTimeKind.Unspecified OrElse mt.Value.dt.Kind = System.DateTimeKind.Local Then
+                ' If dt.kind=Unspecified (e.g. EXIF, Sony), then the time is by assumption already local from when the picture was shot
+                ' If dt.kind=Local (e.g. iPhone-MOV), then the time is local, and also indicates its timezone offset
+                r.localTime = mt.Value.dt
+            ElseIf mt.Value.dt.Kind = System.DateTimeKind.Utc Then
+                ' If dt.Kind=UTC (e.g. Android), then time is in UTC, and we don't know how to read timezone.
+                r.localTime = mt.Value.dt.ToLocalTime() ' Best we can do is guess the timezone of the computer
+            End If
+        Else
+            r.setter = ftt.Item2
+            If ft.dt.Kind = System.DateTimeKind.Unspecified Then
+                ' e.g. Windows Phone when we got the date from the filename
+                r.localTime = ft.dt
+            ElseIf ft.dt.Kind = System.DateTimeKind.Utc Then
+                ' e.g. all other files where we got the date from the filestamp
+                r.localTime = ft.dt.ToLocalTime() ' the best we can do is guess that the photo was taken in the timezone as this computer now
+            Else
+                Throw New Exception("Expected filetimes To be In UTC")
+            End If
+        End If
+
+        Return r
+    End Function
 
 
-    Dim http As HttpClient
 
-    Function OpenStreetMapSearch(latitude As Double, longitude As Double) As String
-        If http Is Nothing Then http = New HttpClient : http.DefaultRequestHeaders.Add("User-Agent", "TestReverseGeocoding")
+    Sub ModifyTimestamp(cmd As Commandline, fileToDo As FileToDo)
+        Using file = New IO.FileStream(fileToDo.fn, IO.FileMode.Open, IO.FileAccess.ReadWrite)
+            Dim prevTime = fileToDo.localTime
+            Dim r = fileToDo.setter(file, cmd.Offset.Value)
+            If r Then
+                fileToDo.localTime += cmd.Offset.Value
+                If cmd.Pattern = "" Then Console.WriteLine("""{0}"": {1:yyyy.MM.dd - HH.mm.ss}, corrected from {2:yyyy.MM.dd - HH.mm.ss}", IO.Path.GetFileName(fileToDo.fn), fileToDo.localTime, prevTime)
+            End If
+        End Using
+    End Sub
+
+    Sub RenameFile(cmd As Commandline, fileToDo As FileToDo)
+        ' Attempt to match the existing filename against the pattern
+        Dim basefn = IO.Path.GetFileNameWithoutExtension(fileToDo.fn)
+        Dim matchremainder = basefn
+        Dim matchParts As New LinkedList(Of PatternPart)(cmd.PatternParts)
+        Dim matchExt = If(cmd.PatternExt, IO.Path.GetExtension(fileToDo.fn))
+
+        While matchParts.Count > 0 AndAlso matchremainder.Length > 0
+            Dim matchPart As PatternPart = matchParts.First.Value
+            Dim matchLength = matchPart.matcher(matchremainder)
+            If matchLength = -1 Then Exit While
+            matchParts.RemoveFirst()
+            If matchPart.pattern = "%{fn}" Then basefn = matchremainder.Substring(0, matchLength)
+            matchremainder = matchremainder.Substring(matchLength)
+        End While
+
+        If matchremainder.Length = 0 AndAlso matchParts.Count = 2 AndAlso matchParts(0).pattern = " - " AndAlso matchParts(1).pattern = "%{place}" Then
+            ' hack if you had pattern like "%{year} - %{fn} - %{place}" so
+            ' it will match a filename like "2012 - file.jpg" which lacks a place
+            matchParts.Clear()
+        End If
+
+        If matchParts.Count <> 0 OrElse matchremainder.Length > 0 Then
+            ' failed to do a complete match
+            basefn = IO.Path.GetFileNameWithoutExtension(fileToDo.fn)
+        End If
+
+        ' Figure out the new filename
+        Dim newfn = IO.Path.GetDirectoryName(fileToDo.fn) & "\"
+        For Each patternPart In cmd.PatternParts
+            newfn &= patternPart.generator(basefn, fileToDo.localTime, fileToDo.place)
+        Next
+        If cmd.PatternParts.Count > 2 AndAlso cmd.PatternParts.Last.Value.pattern = "%{place}" AndAlso cmd.PatternParts.Last.Previous.Value.pattern = " - " AndAlso String.IsNullOrEmpty(fileToDo.place) Then
+            If newfn.EndsWith(" - ") Then newfn = newfn.Substring(0, newfn.Length - 3)
+        End If
+        newfn &= matchExt
+        If fileToDo.fn <> newfn Then
+            If IO.File.Exists(newfn) Then Console.WriteLine("Already exists - " & IO.Path.GetFileName(newfn)) : Return
+            Console.WriteLine(IO.Path.GetFileName(newfn))
+            IO.File.Move(fileToDo.fn, newfn)
+        End If
+    End Sub
+
+
+
+
+
+    Function Gps(latitude As Double, longitude As Double) As String
+        Static Dim http As Net.Http.HttpClient
+        If http Is Nothing Then http = New Net.Http.HttpClient : http.DefaultRequestHeaders.Add("User-Agent", "TestReverseGeocoding")
 
         ' 1. Make the request
         Dim url = $"http://nominatim.openstreetmap.org/reverse?accept-language=en&format=xml&lat={latitude:0.000000}&lon={longitude:0.000000}&zoom=18"
@@ -400,7 +379,6 @@ Module Module1
         End While
         Return String.Join(", ", parts)
     End Function
-
 
 
 
@@ -453,19 +431,8 @@ Module Module1
         Return Tuple.Create(localTime, lambda)
     End Function
 
-    Class GpsCoordinates
-        Public Latitude As Double
-        Public Longitude As Double
-        Public Sub New()
-        End Sub
-        Public Sub New(latitude As Double, longitude As Double)
-            Me.Latitude = latitude
-            Me.Longitude = longitude
-        End Sub
-        Public Overrides Function ToString() As String
-            Return $"lat={Latitude:0.00} long={Longitude:0.00}"
-        End Function
-    End Class
+
+    ReadOnly EmptyResult As New Tuple(Of DateTimeOffset2?, UpdateTimeFunc, GpsCoordinates)(Nothing, Function() False, Nothing)
 
     Function MetadataTimeAndGps(fn As String) As Tuple(Of DateTimeOffset2?, UpdateTimeFunc, GpsCoordinates)
         Using file As New IO.FileStream(fn, IO.FileMode.Open, IO.FileAccess.Read)
@@ -478,6 +445,7 @@ Module Module1
             Return Nothing
         End Using
     End Function
+
 
     Function ExifTime(file As IO.Stream, start As Long, fend As Long) As Tuple(Of DateTimeOffset2?, UpdateTimeFunc, GpsCoordinates)
         Dim timeLastModified, timeOriginal, timeDigitized As DateTime?
@@ -596,13 +564,15 @@ Module Module1
 
         Dim gps As GpsCoordinates = Nothing
         If (gpsNS = "N" OrElse gpsNS = "S") AndAlso gpsLatVal.HasValue AndAlso (gpsEW = "E" OrElse gpsEW = "W") AndAlso gpsLongVal.HasValue Then
-            gps = New GpsCoordinates
-            gps.Latitude = If(gpsNS = "N", gpsLatVal.Value, -gpsLatVal.Value)
-            gps.Longitude = If(gpsEW = "E", gpsLongVal.Value, -gpsLongVal.Value)
+            gps = New GpsCoordinates With {
+                .Latitude = If(gpsNS = "N", gpsLatVal.Value, -gpsLatVal.Value),
+                .Longitude = If(gpsEW = "E", gpsLongVal.Value, -gpsLongVal.Value)
+                }
         End If
 
         Return Tuple.Create(winnerTimeOffset, lambda, gps)
     End Function
+
 
     Function Mp4Time(file As IO.Stream, start As Long, fend As Long) As Tuple(Of DateTimeOffset2?, UpdateTimeFunc, GpsCoordinates)
         ' The file is made up of a sequence of boxes, with a standard way to find size and FourCC "kind" of each.
@@ -827,41 +797,73 @@ Module Module1
         End If
     End Sub
 
-    Structure DateTimeOffset2
-        Public dt As DateTime
-        Public offset As TimeSpan
-        ' Three modes:
-        ' (1) Time known to be in UTC: DateTime.Kind=UTC, offset=0
-        ' (2) Time known to be in some specific timezone: DateTime.Kind=Local, offset gives that timezone
-        ' (3) Time where nothing about timezone is known: DateTime.Kind=Unspecified, offset=0
-
-        Shared Function Utc(d As DateTime) As DateTimeOffset2
-            Dim d2 As New DateTime(d.Ticks, System.DateTimeKind.Utc)
-            Return New DateTimeOffset2 With {.dt = d2, .offset = Nothing}
-        End Function
-        Shared Function Unspecified(d As DateTime) As DateTimeOffset2
-            Dim d2 As New DateTime(d.Ticks, System.DateTimeKind.Unspecified)
-            Return New DateTimeOffset2 With {.dt = d2, .offset = Nothing}
-        End Function
-        Shared Function Local(d As DateTimeOffset) As DateTimeOffset2
-            Dim d2 As New DateTime(d.Ticks, System.DateTimeKind.Local)
-            Return New DateTimeOffset2 With {.dt = d2, .offset = d.Offset}
-        End Function
-
-        Public Overrides Function ToString() As String
-            If dt.Kind = System.DateTimeKind.Utc Then
-                Return dt.ToString("yyyy:MM:ddTHH:mm:ssZ")
-            ElseIf dt.Kind = System.DateTimeKind.Unspecified Then
-                Return dt.ToString("yyyy:MM:dd HH:mm:ss")
-            ElseIf dt.Kind = System.DateTimeKind.Local Then
-                Return dt.ToString("yyyy:MM:dd HH:mm:ss") & offset.Hours.ToString("+00;-00") & "00"
-            Else
-                Throw New Exception("Invalid DateTimeKind")
-            End If
-        End Function
-    End Structure
-
-
-
 End Module
 
+
+Class Commandline
+    Public Pattern As String
+    Public Offset As TimeSpan?
+    Public Fns As New List(Of String)
+    '
+    Public PatternParts As New LinkedList(Of PatternPart) ' derived from Pattern
+    Public PatternExt As String ' derived from Pattern
+End Class
+
+Class PatternPart
+    Public generator As PartGenerator
+    Public matcher As MatchFunction
+    Public pattern As String
+End Class
+
+Delegate Function PartGenerator(fn As String, dt As DateTime, place As String) As String
+Delegate Function MatchFunction(remainder As String) As Integer ' -1 for no-match, otherwise is the number of characters gobbled up
+Delegate Function UpdateTimeFunc(stream As IO.Stream, off As TimeSpan) As Boolean
+
+
+Class FileToDo
+    Public fn As String
+    Public localTime As DateTime
+    Public setter As UpdateTimeFunc
+    Public place As String
+End Class
+
+
+Class GpsCoordinates
+    Public Latitude As Double
+    Public Longitude As Double
+End Class
+
+
+Structure DateTimeOffset2
+    Public dt As DateTime
+    Public offset As TimeSpan
+    ' Three modes:
+    ' (1) Time known to be in UTC: DateTime.Kind=UTC, offset=0
+    ' (2) Time known to be in some specific timezone: DateTime.Kind=Local, offset gives that timezone
+    ' (3) Time where nothing about timezone is known: DateTime.Kind=Unspecified, offset=0
+
+    Shared Function Utc(d As DateTime) As DateTimeOffset2
+        Dim d2 As New DateTime(d.Ticks, System.DateTimeKind.Utc)
+        Return New DateTimeOffset2 With {.dt = d2, .offset = Nothing}
+    End Function
+    Shared Function Unspecified(d As DateTime) As DateTimeOffset2
+        Dim d2 As New DateTime(d.Ticks, System.DateTimeKind.Unspecified)
+        Return New DateTimeOffset2 With {.dt = d2, .offset = Nothing}
+    End Function
+    Shared Function Local(d As DateTimeOffset) As DateTimeOffset2
+        Dim d2 As New DateTime(d.Ticks, System.DateTimeKind.Local)
+        Return New DateTimeOffset2 With {.dt = d2, .offset = d.Offset}
+    End Function
+
+    Public Overrides Function ToString() As String
+        If dt.Kind = System.DateTimeKind.Utc Then
+            Return dt.ToString("yyyy:MM:ddTHH:mm:ssZ")
+        ElseIf dt.Kind = System.DateTimeKind.Unspecified Then
+            Return dt.ToString("yyyy:MM:dd HH:mm:ss")
+        ElseIf dt.Kind = System.DateTimeKind.Local Then
+            Return dt.ToString("yyyy:MM:dd HH:mm:ss") & offset.Hours.ToString("+00;-00") & "00"
+        Else
+            Throw New Exception("Invalid DateTimeKind")
+        End If
+    End Function
+End Structure
