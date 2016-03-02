@@ -83,7 +83,7 @@ static class Program
             var cmd = cmdArgs.First.Value; cmdArgs.RemoveFirst();
             if (cmd == "-rename" || cmd == "/rename")
             {
-                if (r.Pattern != "") { Console.WriteLine("duplicate -rename"); return null; }
+                if (!string.IsNullOrEmpty(r.Pattern)) { Console.WriteLine("duplicate -rename"); return null; }
                 r.Pattern = "%{datetime} - %{fn} - %{place}";
                 if (cmdArgs.Count > 0 && !cmdArgs.First.Value.StartsWith("/") && !cmdArgs.First.Value.StartsWith("-")) { r.Pattern = cmdArgs.First.Value; cmdArgs.RemoveFirst(); }
             }
