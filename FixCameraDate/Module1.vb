@@ -377,7 +377,14 @@ Module Module1
         While pi < parts.Count - 1
             If parts.Take(pi).Any(Function(s) s.Contains(parts(pi))) Then parts.RemoveAt(pi) Else pi += 1
         End While
-        Return String.Join(", ", parts)
+
+        ' 4. Sanitize
+        Dim r = String.Join(", ", parts)
+        For Each disallowed In {"/"c, "\"c, "?"c, "%"c, "*"c, "?"c, ":"c, "|"c, """"c, "<"c, ">"c, "."c, "-"c}
+            r = r.Replace(disallowed, " ")
+        Next
+        r = r.Replace("  ", " ")
+        Return r
     End Function
 
 
