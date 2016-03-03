@@ -129,7 +129,6 @@ static partial class Program
 
             // 3. Assemble these into a name
             var parts = new List<string>();
-            parts.AddRange(names);
             if (result != null) parts.Add(result); else if (road != null) parts.Add(road);
             if (suburb != null) parts.Add(suburb); else if (neighbourhood != null) parts.Add(neighbourhood);
             if (city != null) parts.Add(city); else if (county != null) parts.Add(county);
@@ -138,6 +137,10 @@ static partial class Program
             {
                 if (parts.Take(pi).Any(s => s.Contains(parts[pi]))) parts.RemoveAt(pi);
                 else pi += 1;
+            }
+            foreach (var name in names.Reverse<string>())
+            {
+                if (!parts.Any(s => s.Contains(name))) parts.Insert(0, name);
             }
             q[i].OpenStreetMapsResult = string.Join(", ", parts);
         }
