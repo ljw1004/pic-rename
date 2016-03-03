@@ -127,7 +127,7 @@ static partial class Program
                 else if (tags.TryGetValue("name", out name)) names.Add(name);
             }
 
-            // 3. Assemble these into a name
+            // 4. Assemble these into a name
             var parts = new List<string>();
             if (result != null) parts.Add(result); else if (road != null) parts.Add(road);
             if (suburb != null) parts.Add(suburb); else if (neighbourhood != null) parts.Add(neighbourhood);

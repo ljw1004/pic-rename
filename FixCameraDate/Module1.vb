@@ -361,22 +361,37 @@ Module Module1
         Static Dim http As Net.Http.HttpClient
         If http Is Nothing Then http = New Net.Http.HttpClient : http.DefaultRequestHeaders.Add("User-Agent", "FixCameraDate")
 
-        ' 1. Make the request
-        Dim url = $"http://nominatim.openstreetmap.org/reverse?accept-language=en&format=xml&lat={latitude:0.000000}&lon={longitude:0.000000}&zoom=18"
-        Dim raw = http.GetStringAsync(url).GetAwaiter().GetResult()
-        Dim xml = XDocument.Parse(raw)
+        ' 1. Make two web requests concurrently
+        Dim url1 = $"http://nominatim.openstreetmap.org/reverse?accept-language=en&format=xml&lat={latitude:0.000000}&lon={longitude:0.000000}&zoom=18"
+        Dim raw1Task = http.GetStringAsync(url1)
+        Dim url2 = $"http://overpass-api.de/api/interpreter?data=is_in({latitude:0.000000},{longitude:0.000000});out;"
+        Dim raw2Task = http.GetStringAsync(url2)
 
-        ' 2. Parse the response
-        Dim result = xml...<result>.@ref
-        Dim road = xml...<road>.Value
-        Dim neighbourhood = xml...<neighbourhood>.Value
-        Dim suburb = xml...<suburb>.Value
-        Dim city = xml...<city>.Value
-        Dim county = xml...<county>.Value
-        Dim state = xml...<state>.Value
-        Dim country = xml...<country>.Value
+        ' 2. Parse the Nominatim response
+        Dim raw1 = raw1Task.GetAwaiter().GetResult()
+        Dim xml1 = XDocument.Parse(raw1)
+        Dim result = xml1...<result>.@ref
+        Dim road = xml1...<road>.Value
+        Dim neighbourhood = xml1...<neighbourhood>.Value
+        Dim suburb = xml1...<suburb>.Value
+        Dim city = xml1...<city>.Value
+        Dim county = xml1...<county>.Value
+        Dim state = xml1...<state>.Value
+        Dim country = xml1...<country>.Value
 
-        ' 3. Assemble these into a name
+        ' 3. Parse the Overpass result
+        Dim raw2 = raw2Task.GetAwaiter().GetResult()
+        Dim xml2 = XDocument.Parse(raw2)
+        Dim names As New List(Of String)
+        For Each area In xml2...<area>
+            Dim tags = area...<tag>.ToDictionary(Function(tag) tag.@k, Function(tag) tag.@v)
+            If tags.Keys.Any(Function(s) s.Contains("admin_level")) Then Continue For
+            If tags.Keys.Any(Function(s) s.Contains("boundary")) Then Continue For
+            Dim name = ""
+            If tags.TryGetValue("name:en", name) Then names.Add(name) Else If tags.TryGetValue("name", name) Then names.Add(name)
+        Next
+
+        ' 4. Assemble these into a name
         Dim parts As New List(Of String)
         If result IsNot Nothing Then parts.Add(result) Else If road IsNot Nothing Then parts.Add(road)
         If suburb IsNot Nothing Then parts.Add(suburb) Else If neighbourhood IsNot Nothing Then parts.Add(neighbourhood)
@@ -386,8 +401,11 @@ Module Module1
         While pi < parts.Count - 1
             If parts.Take(pi).Any(Function(s) s.Contains(parts(pi))) Then parts.RemoveAt(pi) Else pi += 1
         End While
+        For Each name In Enumerable.Reverse(names)
+            If Not parts.Any(Function(s) s.Contains(name)) Then parts.Insert(0, name)
+        Next
 
-        ' 4. Sanitize
+        ' 5. Sanitize
         Dim r = String.Join(", ", parts)
         For Each disallowed In {"/"c, "\"c, "?"c, "%"c, "*"c, "?"c, ":"c, "|"c, """"c, "<"c, ">"c, "."c, "-"c}
             r = r.Replace(disallowed, " ")

@@ -402,22 +402,41 @@ static class Program
     {
         if (http == null) { http = new HttpClient(); http.DefaultRequestHeaders.Add("User-Agent", "FixCameraDate"); }
 
-        // 1. Make the request
-        var url = $"http://nominatim.openstreetmap.org/reverse?accept-language=en&format=xml&lat={latitude:0.000000}&lon={longitude:0.000000}&zoom=18";
-        var raw = http.GetStringAsync(url).GetAwaiter().GetResult();
-        var xml = XDocument.Parse(raw);
+        // 1. Make two web requests concurrently
+        var url1 = $"http://nominatim.openstreetmap.org/reverse?accept-language=en&format=xml&lat={latitude:0.000000}&lon={longitude:0.000000}&zoom=18";
+        var raw1Task = http.GetStringAsync(url1);
+        var url2 = $"http://overpass-api.de/api/interpreter?data=is_in({latitude:0.000000},{longitude:0.000000});out;";
+        var raw2Task = http.GetStringAsync(url2);
 
-        // 2. Parse the response
-        var result = xml.Descendants("result").FirstOrDefault()?.Attribute("ref")?.Value;
-        var road = xml.Descendants("road").FirstOrDefault()?.Value;
-        var neighbourhood = xml.Descendants("neighbourhood").FirstOrDefault()?.Value;
-        var suburb = xml.Descendants("suburb").FirstOrDefault()?.Value;
-        var city = xml.Descendants("city").FirstOrDefault()?.Value;
-        var county = xml.Descendants("county").FirstOrDefault()?.Value;
-        var state = xml.Descendants("state").FirstOrDefault()?.Value;
-        var country = xml.Descendants("country").FirstOrDefault()?.Value;
+        // 2. Parse the Nominatim response
+        var raw1 = raw1Task.GetAwaiter().GetResult();
+        var xml1 = XDocument.Parse(raw1);
+        var result = xml1.Descendants("result").FirstOrDefault()?.Attribute("ref")?.Value;
+        var road = xml1.Descendants("road").FirstOrDefault()?.Value;
+        var neighbourhood = xml1.Descendants("neighbourhood").FirstOrDefault()?.Value;
+        var suburb = xml1.Descendants("suburb").FirstOrDefault()?.Value;
+        var city = xml1.Descendants("city").FirstOrDefault()?.Value;
+        var county = xml1.Descendants("county").FirstOrDefault()?.Value;
+        var state = xml1.Descendants("state").FirstOrDefault()?.Value;
+        var country = xml1.Descendants("country").FirstOrDefault()?.Value;
 
-        // 3. Assemble these into a name
+        // 3. Parse the Overpass result
+        var raw2 = raw2Task.GetAwaiter().GetResult();
+        var xml2 = XDocument.Parse(raw2);
+        var names = new List<string>();
+        foreach (var area in xml2.Descendants("area"))
+        {
+            var tags = area.Descendants("tag").ToDictionary(
+                             tag => tag.Attribute("k").Value,
+                             tag => tag.Attribute("v").Value);
+            if (tags.Keys.Any(s => s.Contains("admin_level"))) continue;
+            if (tags.Keys.Any(s => s.Contains("boundary"))) continue;
+            string name;
+            if (tags.TryGetValue("name:en", out name)) names.Add(name);
+            else if (tags.TryGetValue("name", out name)) names.Add(name);
+        }
+
+        // 4. Assemble these into a name
         var parts = new List<string>();
         if (result != null) parts.Add(result); else if (road != null) parts.Add(road);
         if (suburb != null) parts.Add(suburb); else if (neighbourhood != null) parts.Add(neighbourhood);
@@ -428,8 +447,12 @@ static class Program
             if (parts.Take(pi).Any(s => s.Contains(parts[pi]))) parts.RemoveAt(pi);
             else pi += 1;
         }
-
-        // 4. Sanitize
+        foreach (var name in names.Reverse<string>())
+        {
+            if (!parts.Any(s => s.Contains(name))) parts.Insert(0, name);
+        }
+        
+        // 5. Sanitize
         var r = string.Join(", ", parts);
         foreach (var disallowed in new[] { '/', '\\', '?', '%', '*', '?', ':', '|', '"', '<', '>', '.', '-' })
         {
