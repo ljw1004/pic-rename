@@ -114,24 +114,18 @@ static partial class Program
             // 3. Parse the Overpass result
             var raw2 = raw2Task.GetAwaiter().GetResult();
             var xml2 = XDocument.Parse(raw2);
-            var names = xml2.Descendants("area")
-                            .Select(area =>
-                            {
-                                var name = area.Descendants("tag")
-                                           .Where(t => t.Attribute("k").Value == "name")
-                                           .Select(t => t.Attribute("v").Value)
-                                           .FirstOrDefault();
-                                var nameen = area.Descendants("tag")
-                                            .Where(t => t.Attribute("k").Value == "name:en")
-                                            .Select(t => t.Attribute("v").Value)
-                                            .FirstOrDefault();
-                                var isadmin = area.Descendants("tag")
-                                            .Where(t => t.Attribute("k").Value == "admin_level")
-                                            .Any();
-                                return new { name, nameen, isadmin };
-                            })
-                            .Where(tt => !tt.isadmin && (tt.name != null || tt.nameen != null))
-                            .Select(tt => tt.nameen ?? tt.name);
+            var names = new List<string>();
+            foreach (var area in xml2.Descendants("area"))
+            {
+                var tags = area.Descendants("tag").ToDictionary(
+                                 tag => tag.Attribute("k").Value,
+                                 tag => tag.Attribute("v").Value);
+                if (tags.Keys.Any(s => s.Contains("admin_level"))) continue;
+                if (tags.Keys.Any(s => s.Contains("boundary"))) continue;
+                string name;
+                if (tags.TryGetValue("name:en", out name)) names.Add(name);
+                else if (tags.TryGetValue("name", out name)) names.Add(name);
+            }
 
             // 3. Assemble these into a name
             var parts = new List<string>();
@@ -244,7 +238,7 @@ static partial class Program
 
 
         if (string.IsNullOrEmpty(BingMapsKey)) throw new Exception("Please recompile with a valid Bing Maps Key");
-        Console.Write("Bing Locations+Spatial");
+        Console.Write("Bing Maps     ");
         var http = new HttpClient();
         var sw = Stopwatch.StartNew();
 
