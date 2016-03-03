@@ -126,12 +126,8 @@ Module Module1
                     r.Fns = If(r.Fns, New List(Of String))
                     r.Fns.AddRange(fns)
                 Else
-                    If IO.File.Exists(cmd) Then
-                        r.Fns = If(r.Fns, New List(Of String))
-                        r.Fns.Add(cmd)
-                    Else
-                        Console.WriteLine($"Not found - ""{cmd}""")
-                    End If
+                    r.Fns = If(r.Fns, New List(Of String))
+                    If IO.File.Exists(cmd) Then r.Fns.Add(cmd) Console.WriteLine($"Not found - ""{cmd}""")
                 End If
             End If
         End While
@@ -348,7 +344,9 @@ Module Module1
             If newfn.EndsWith(" - ") Then newfn = newfn.Substring(0, newfn.Length - 3)
         End If
         newfn &= matchExt
-        If fileToDo.fn <> newfn Then
+        If fileToDo.fn = newfn Then
+            Console.WriteLine($"[unchanged] {IO.Path.GetFileName(newfn)}")
+        Else
             If IO.File.Exists(newfn) Then Console.WriteLine("Already exists - " & IO.Path.GetFileName(newfn)) : Return
             Console.WriteLine(IO.Path.GetFileName(newfn))
             IO.File.Move(fileToDo.fn, newfn)
@@ -739,14 +737,18 @@ Module Module1
         Dim kind = ChrW(b(0)) & ChrW(b(1)) & ChrW(b(2)) & ChrW(b(3))
         If size <> 1 Then
             If pos + size > fend Then Return False
-            boxKind = kind : payloadStart = pos + 8 : payloadEnd = payloadStart + size - 8 : Return True
+            If size = 0 Then Return False
+            boxKind = kind : payloadStart = pos + 8 : payloadEnd = payloadStart + size - 8
+            Return True
         End If
         If size = 1 AndAlso pos + 16 <= fend Then
             ReDim b(7)
             f.Read(b, 0, 8) : If BitConverter.IsLittleEndian Then Array.Reverse(b)
             Dim size2 = CLng(BitConverter.ToUInt64(b, 0))
             If pos + size2 > fend Then Return False
-            boxKind = kind : payloadStart = pos + 16 : payloadEnd = payloadStart + size2 - 16 : Return True
+            If size = 0 Then Return False
+            boxKind = kind : payloadStart = pos + 16 : payloadEnd = payloadStart + size2 - 16
+            Return True
         End If
         Return False
     End Function
