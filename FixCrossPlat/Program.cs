@@ -51,6 +51,7 @@ static class Program
         Console.WriteLine("Space Needle, Seattle - " + Gps(47.620415, -122.349463));
         Console.WriteLine("Pike Place Market, Seattle - " + Gps(47.609839, -122.342981));
         Console.WriteLine("UW Campus, Seattle - " + Gps(47.65464, -122.30843));
+        Console.WriteLine("Microsoft Building 25 - " + Gps(47.64529, -122.13064));
         Console.WriteLine("Stuart Island, WA - " + Gps(48.67998, -123.23106));
         Console.WriteLine("Lihue, Kauai - " + Gps(21.97472, -159.3656));
         Console.WriteLine("Polihale Beach, Kauai - " + Gps(22.08223, -159.76265));
@@ -442,17 +443,32 @@ static class Program
         if (suburb != null) parts.Add(suburb); else if (neighbourhood != null) parts.Add(neighbourhood);
         if (city != null) parts.Add(city); else if (county != null) parts.Add(county);
         if (country == "United States of America" || country == "United Kingdom") parts.Add(state); else parts.Add(country);
+        foreach (var name in names.Reverse<string>())
+        {
+            if (!parts.Any(s => s.Contains(name))) parts.Insert(0, name);
+        }
+
+        // 5. Because OpenStreetMap can potentially have many redundant names, it
+        // needs extra simplification work. e.g. "Microsoft Redmond Campus, Microsoft
+        // Redmond East Campus, Microsoft Building 25, Microsoft, Redmond, Washington".
+        // First we'll remove anything whose name is wholly contained in another (except, keep the country/state)
         int pi = 1; while (pi < parts.Count - 1)
         {
             if (parts.Take(pi).Any(s => s.Contains(parts[pi]))) parts.RemoveAt(pi);
             else pi += 1;
         }
-        foreach (var name in names.Reverse<string>())
+        // Next, for each part, remove all the individual words that appeared previously
+        var preceding = new HashSet<string>();
+        for (pi = 0; pi < parts.Count; pi++)
         {
-            if (!parts.Any(s => s.Contains(name))) parts.Insert(0, name);
+            var pwords = parts[pi].Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)
+                         .Where(w => !preceding.Contains(w)).ToList();
+            foreach (var pw in pwords) preceding.Add(pw);
+            parts[pi] = String.Join(" ", pwords);
         }
-        
-        // 5. Sanitize
+        parts = parts.Where(s => s.Length > 0).ToList();
+
+        // 6. Sanitize
         var r = string.Join(", ", parts);
         foreach (var disallowed in new[] { '/', '\\', '?', '%', '*', '?', ':', '|', '"', '<', '>', '.', '-' })
         {

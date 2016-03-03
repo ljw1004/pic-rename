@@ -59,6 +59,7 @@ Module Module1
         Console.WriteLine("Space Needle, Seattle - " & Gps(47.620415, -122.349463))
         Console.WriteLine("Pike Place Market, Seattle - " & Gps(47.609839, -122.342981))
         Console.WriteLine("UW Campus, Seattle - " & Gps(47.65464, -122.30843))
+        Console.WriteLine("Microsoft Building 25 - " + Gps(47.64529, -122.13064))
         Console.WriteLine("Stuart Island, WA - " & Gps(48.67998, -123.23106))
         Console.WriteLine("Lihue, Kauai - " & Gps(21.97472, -159.3656))
         Console.WriteLine("Polihale Beach, Kauai - " & Gps(22.08223, -159.76265))
@@ -397,15 +398,28 @@ Module Module1
         If suburb IsNot Nothing Then parts.Add(suburb) Else If neighbourhood IsNot Nothing Then parts.Add(neighbourhood)
         If city IsNot Nothing Then parts.Add(city) Else If county IsNot Nothing Then parts.Add(county)
         If country = "United States of America" OrElse country = "United Kingdom" Then parts.Add(state) Else parts.Add(country)
-        Dim pi = 1
-        While pi < parts.Count - 1
-            If parts.Take(pi).Any(Function(s) s.Contains(parts(pi))) Then parts.RemoveAt(pi) Else pi += 1
-        End While
         For Each name In Enumerable.Reverse(names)
             If Not parts.Any(Function(s) s.Contains(name)) Then parts.Insert(0, name)
         Next
 
-        ' 5. Sanitize
+        ' 5. Because OpenStreetMap can potentially have many redundant names, it
+        ' needs extra simplification work. e.g. "Microsoft Redmond Campus, Microsoft
+        ' Redmond East Campus, Microsoft Building 25, Microsoft, Redmond, Washington".
+        ' First we'll remove anything whose name is wholly contained in another (except, keep the country/state)
+        Dim pi = 1 : While pi < parts.Count - 1
+            If parts.Take(pi).Any(Function(s) s.Contains(parts(pi))) Then parts.RemoveAt(pi) Else pi += 1
+        End While
+        ' Next, for each part, remove all the individual words that appeared previously
+        Dim preceding As New HashSet(Of String)
+        For pi = 0 To parts.Count - 1
+            Dim pwords = parts(pi).Split({" "c}, StringSplitOptions.RemoveEmptyEntries).
+                         Where(Function(w) Not preceding.Contains(w)).ToList()
+            For Each pw In pwords : preceding.Add(pw) : Next
+            parts(pi) = String.Join(" ", pwords)
+        Next
+        parts = parts.Where(Function(s) s.Length > 0).ToList()
+
+        ' 6. Sanitize
         Dim r = String.Join(", ", parts)
         For Each disallowed In {"/"c, "\"c, "?"c, "%"c, "*"c, "?"c, ":"c, "|"c, """"c, "<"c, ">"c, "."c, "-"c}
             r = r.Replace(disallowed, " ")
@@ -413,8 +427,6 @@ Module Module1
         r = r.Replace("  ", " ")
         Return r
     End Function
-
-
 
 
     Function FilestampTime(fn As String) As Tuple(Of DateTimeOffset2, UpdateTimeFunc)

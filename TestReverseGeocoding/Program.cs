@@ -23,6 +23,7 @@ static partial class Program
             new WorkItem() { Tag = "Space Needle, Seattle", Latitude=47.620415, Longitude=-122.349463 },
             new WorkItem() { Tag = "Pike Place Market, Seattle", Latitude=47.609839, Longitude=-122.342981 },
             new WorkItem() { Tag = "UW Campus, Seattle", Latitude=47.65464, Longitude=-122.30843 },
+            new WorkItem() { Tag = "Microsoft Building 25", Latitude = 47.64529, Longitude = -122.13064 },
             new WorkItem() { Tag = "Stuart Island, WA", Latitude=48.67998, Longitude=-123.23106 },
             new WorkItem() { Tag = "Lihue, Kauai", Latitude=21.97472, Longitude=-159.3656 },
             new WorkItem() { Tag = "Polihale Beach, Kauai", Latitude=22.08223, Longitude=-159.76265 },
@@ -133,15 +134,31 @@ static partial class Program
             if (suburb != null) parts.Add(suburb); else if (neighbourhood != null) parts.Add(neighbourhood);
             if (city != null) parts.Add(city); else if (county != null) parts.Add(county);
             if (country == "United States of America" || country == "United Kingdom") parts.Add(state); else parts.Add(country);
+            foreach (var name in names.Reverse<string>())
+            {
+                if (!parts.Any(s => s.Contains(name))) parts.Insert(0, name);
+            }
+
+            // 5. Because OpenStreetMap can potentially have many redundant names, it
+            // needs extra simplification work. e.g. "Microsoft Redmond Campus, Microsoft
+            // Redmond East Campus, Microsoft Building 25, Microsoft, Redmond, Washington".
+            // First we'll remove anything whose name is wholly contained in another (except, keep the country/state)
             int pi = 1; while (pi < parts.Count - 1)
             {
                 if (parts.Take(pi).Any(s => s.Contains(parts[pi]))) parts.RemoveAt(pi);
                 else pi += 1;
             }
-            foreach (var name in names.Reverse<string>())
+            // Next, for each part, remove all the individual words that appeared previously
+            var preceding = new HashSet<string>();
+            for (pi = 0; pi < parts.Count; pi++)
             {
-                if (!parts.Any(s => s.Contains(name))) parts.Insert(0, name);
+                var pwords = parts[pi].Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)
+                             .Where(w => !preceding.Contains(w)).ToList();
+                foreach (var pw in pwords) preceding.Add(pw);
+                parts[pi] = String.Join(" ", pwords);
             }
+            parts = parts.Where(s => s.Length > 0).ToList();
+
             q[i].OpenStreetMapsResult = string.Join(", ", parts);
         }
         sw.Stop();
