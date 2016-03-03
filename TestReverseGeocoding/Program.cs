@@ -12,6 +12,8 @@ static partial class Program
     {
         var q = new[] {
             // North America
+            new WorkItem() { Tag = "Woodland Park Zoo, Seattle", Latitude = 47.66715, Longitude = -122.35183 },
+            new WorkItem() { Tag = "Seattle Center", Latitude = 47.62128, Longitude = -122.35082 },
             new WorkItem() { Tag = "Montlake, Seattle", Latitude = 47.637922, Longitude = -122.301557 },
             new WorkItem() { Tag = "Volunteer Park, Seattle", Latitude=47.629612, Longitude=-122.315119 },
             new WorkItem() { Tag = "Arboretum, Seattle", Latitude=47.639483, Longitude=-122.29801 },
@@ -64,12 +66,24 @@ static partial class Program
 
     static TimeSpan OpenStreetMapSearch(IList<WorkItem> q)
     {
-        // Documentation: http://wiki.openstreetmap.org/wiki/Overpass_API
+        // Overpass API. http://wiki.openstreetmap.org/wiki/Overpass_API
         // Experiment with API: http://overpass-turbo.eu/
-        // Reverse geocoding: http://wiki.openstreetmap.org/wiki/Nominatim
+        // This is a scripting language that operates over the geometry objects.
+        // The command that we'll use is "is_in(lat,long);out;" which returns
+        // a list of all geometries that contain the point in question.
+        // It's free up to 10k requests/day.
+
+        // Nominatim. http://wiki.openstreetmap.org/wiki/Nominatim
+        // This is for geocoding and reverse geocoding. It's more sophisticated
+        // than just plain is_in, and does clever stuff with geometries to
+        // figure out a good address or POI that's near your lat/lon.
         // That Nominatim server is heavily rate-limited. For paid offerings, look at
         // https://developer.mapquest.com/plans
         // https://geocoder.opencagedata.com/pricing
+
+        // I will combine the two. I'll use the result from Nominatim, but augment
+        // it with all the extra stuff from is_in.
+
 
         Console.Write("OSM           ");
         var http = new HttpClient();
@@ -78,22 +92,50 @@ static partial class Program
         var sw = Stopwatch.StartNew();
         for (int i = 0; i < q.Count; i++)
         {
-            // 1. Make the web request
+            // 1. Make two web requests concurrently
             Console.Write(".");
-            var url = $"http://nominatim.openstreetmap.org/reverse?accept-language=en&format=xml&lat={q[i].Latitude:0.000000}&lon={q[i].Longitude:0.000000}&zoom=18";
-            var raw = http.GetStringAsync(url).GetAwaiter().GetResult();
-            var xml = XDocument.Parse(raw);
-            // 2. Parse the response
-            var result = xml.Descendants("result").FirstOrDefault()?.Attribute("ref")?.Value;
-            var road = xml.Descendants("road").FirstOrDefault()?.Value;
-            var neighbourhood = xml.Descendants("neighbourhood").FirstOrDefault()?.Value;
-            var suburb = xml.Descendants("suburb").FirstOrDefault()?.Value;
-            var city = xml.Descendants("city").FirstOrDefault()?.Value;
-            var county = xml.Descendants("county").FirstOrDefault()?.Value;
-            var state = xml.Descendants("state").FirstOrDefault()?.Value;
-            var country = xml.Descendants("country").FirstOrDefault()?.Value;
+            var url1 = $"http://nominatim.openstreetmap.org/reverse?accept-language=en&format=xml&lat={q[i].Latitude:0.000000}&lon={q[i].Longitude:0.000000}&zoom=18";
+            var raw1Task = http.GetStringAsync(url1);
+            var url2 = $"http://overpass-api.de/api/interpreter?data=is_in({q[i].Latitude:0.000000},{q[i].Longitude:0.000000});out;";
+            var raw2Task = http.GetStringAsync(url2);
+
+            // 2. Parse the Nominatim response
+            var raw1 = raw1Task.GetAwaiter().GetResult();
+            var xml1 = XDocument.Parse(raw1);
+            var result = xml1.Descendants("result").FirstOrDefault()?.Attribute("ref")?.Value;
+            var road = xml1.Descendants("road").FirstOrDefault()?.Value;
+            var neighbourhood = xml1.Descendants("neighbourhood").FirstOrDefault()?.Value;
+            var suburb = xml1.Descendants("suburb").FirstOrDefault()?.Value;
+            var city = xml1.Descendants("city").FirstOrDefault()?.Value;
+            var county = xml1.Descendants("county").FirstOrDefault()?.Value;
+            var state = xml1.Descendants("state").FirstOrDefault()?.Value;
+            var country = xml1.Descendants("country").FirstOrDefault()?.Value;
+
+            // 3. Parse the Overpass result
+            var raw2 = raw2Task.GetAwaiter().GetResult();
+            var xml2 = XDocument.Parse(raw2);
+            var names = xml2.Descendants("area")
+                            .Select(area =>
+                            {
+                                var name = area.Descendants("tag")
+                                           .Where(t => t.Attribute("k").Value == "name")
+                                           .Select(t => t.Attribute("v").Value)
+                                           .FirstOrDefault();
+                                var nameen = area.Descendants("tag")
+                                            .Where(t => t.Attribute("k").Value == "name:en")
+                                            .Select(t => t.Attribute("v").Value)
+                                            .FirstOrDefault();
+                                var isadmin = area.Descendants("tag")
+                                            .Where(t => t.Attribute("k").Value == "admin_level")
+                                            .Any();
+                                return new { name, nameen, isadmin };
+                            })
+                            .Where(tt => !tt.isadmin && (tt.name != null || tt.nameen != null))
+                            .Select(tt => tt.nameen ?? tt.name);
+
             // 3. Assemble these into a name
             var parts = new List<string>();
+            parts.AddRange(names);
             if (result != null) parts.Add(result); else if (road != null) parts.Add(road);
             if (suburb != null) parts.Add(suburb); else if (neighbourhood != null) parts.Add(neighbourhood);
             if (city != null) parts.Add(city); else if (county != null) parts.Add(county);
