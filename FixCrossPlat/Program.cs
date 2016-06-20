@@ -501,9 +501,10 @@ static class Program
                 {
                     foreach (var value in header.Value)
                     {
-                        Console.WriteLine($"{header}={value}");
+                        Console.WriteLine($"{header.Key}={value}");
                     }
                 }
+                resp.EnsureSuccessStatusCode();
             }
             return await resp.Content.ReadAsStringAsync();
         }
