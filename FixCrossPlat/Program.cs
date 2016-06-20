@@ -485,12 +485,27 @@ static class Program
         while (true)
         {
             var resp = await http.GetAsync(url);
-            if ((int)resp.StatusCode != 429) return await resp.Content.ReadAsStringAsync();
-            if (resp.Headers.RetryAfter != null && resp.Headers.RetryAfter.Delta != null) delay = resp.Headers.RetryAfter.Delta.Value;
-            else if (resp.Headers.RetryAfter != null && resp.Headers.RetryAfter.Date != null) delay = resp.Headers.RetryAfter.Date.Value - DateTimeOffset.UtcNow;
-            else delay += delay;
-            if (delay > TimeSpan.FromMilliseconds(32000)) delay = TimeSpan.FromMilliseconds(32000);
-            Console.WriteLine($"[Server busy; wait {delay.TotalMilliseconds:0}ms to retry {url}]");
+            if ((int)resp.StatusCode == 429)
+            {
+                if (resp.Headers.RetryAfter != null && resp.Headers.RetryAfter.Delta != null) delay = resp.Headers.RetryAfter.Delta.Value;
+                else if (resp.Headers.RetryAfter != null && resp.Headers.RetryAfter.Date != null) delay = resp.Headers.RetryAfter.Date.Value - DateTimeOffset.UtcNow;
+                else delay += delay;
+                if (delay > TimeSpan.FromMilliseconds(32000)) delay = TimeSpan.FromMilliseconds(32000);
+                Console.WriteLine($"[Server busy; wait {delay.TotalMilliseconds:0}ms to retry {url}]");
+                continue;
+            }
+            if (!resp.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"[error {resp.StatusCode} on ${url}]");
+                foreach (var header in resp.Headers)
+                {
+                    foreach (var value in header.Value)
+                    {
+                        Console.WriteLine($"{header}={value}");
+                    }
+                }
+            }
+            return await resp.Content.ReadAsStringAsync();
         }
     }
 
