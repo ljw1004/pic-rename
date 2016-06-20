@@ -10,7 +10,7 @@ using System.IO;
 using System.Xml.Linq;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
-
+using System.Threading.Tasks;
 
 static class Program
 {
@@ -58,7 +58,7 @@ static class Program
         // Europe
         Console.WriteLine("Aberdeen, Scotland - " + Gps(57.14727, -2.095665));
         Console.WriteLine("The Chanonry, Old Aberdeen - " + Gps(57.169365, -2.101216));
-        Console.WriteLine("Queens// College, Cambridge - " + Gps(52.20234, 0.11589));
+        Console.WriteLine("Queens' College, Cambridge - " + Gps(52.20234, 0.11589));
         Console.WriteLine("Eiffel Tower, Paris - " + Gps(48.858262, 2.293763));
         Console.WriteLine("Trevi Fountain, Rome - " + Gps(41.900914, 12.483172));
         // Canada
@@ -405,9 +405,9 @@ static class Program
 
         // 1. Make two web requests concurrently
         var url1 = $"http://nominatim.openstreetmap.org/reverse?accept-language=en&format=xml&lat={latitude:0.000000}&lon={longitude:0.000000}&zoom=18";
-        var raw1Task = http.GetStringAsync(url1);
+        var raw1Task = http.GetString429Async(url1);
         var url2 = $"http://overpass-api.de/api/interpreter?data=is_in({latitude:0.000000},{longitude:0.000000});out;";
-        var raw2Task = http.GetStringAsync(url2);
+        var raw2Task = http.GetString429Async(url2);
 
         // 2. Parse the Nominatim response
         var raw1 = raw1Task.GetAwaiter().GetResult();
@@ -476,6 +476,22 @@ static class Program
         }
         r = r.Replace("  ", " ");
         return r;
+    }
+
+
+    static async Task<string> GetString429Async(this HttpClient http, string url)
+    {
+        var delay = TimeSpan.FromMilliseconds(500);
+        while (true)
+        {
+            var resp = await http.GetAsync(url);
+            if ((int)resp.StatusCode != 429) return await resp.Content.ReadAsStringAsync();
+            if (resp.Headers.RetryAfter != null && resp.Headers.RetryAfter.Delta != null) delay = resp.Headers.RetryAfter.Delta.Value;
+            else if (resp.Headers.RetryAfter != null && resp.Headers.RetryAfter.Date != null) delay = resp.Headers.RetryAfter.Date.Value - DateTimeOffset.UtcNow;
+            else delay += delay;
+            if (delay > TimeSpan.FromMilliseconds(32000)) delay = TimeSpan.FromMilliseconds(32000);
+            Console.WriteLine($"[Server busy; wait {delay.TotalMilliseconds:0}ms to retry {url}]");
+        }
     }
 
 
