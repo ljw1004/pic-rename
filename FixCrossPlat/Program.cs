@@ -160,6 +160,36 @@ static class Program
         return r;
     }
 
+    static IEnumerable<string> Glob(string path, bool forFiles = true)
+    {
+        if (path == "" && forFiles) throw new ArgumentException(nameof(Path));
+        if (path == "") { yield return Directory.GetCurrentDirectory(); yield break; }
+        if (!forFiles && !path.Contains("*") && !path.Contains("?")) { yield return path; yield break; }
+        string pbase = Path.GetDirectoryName(path), pmask = Path.GetFileName(path);
+        bool isCaseSensitive = IsCaseSensitive();
+        foreach (var directory in Glob(pbase, false))
+        {
+            if (pmask == "..") { yield return Path.GetDirectoryName(directory); continue; }
+            if (pmask == ".") { yield return directory; continue; }
+            var re = "^" + Regex.Escape(pmask).Replace("\\*", ".*").Replace("\\?", ".") + "$";
+            if (!isCaseSensitive) re = "(?i)" + re;
+            foreach (var s in forFiles ? Directory.GetFiles(directory) : Directory.GetDirectories(directory))
+            {
+                if (Regex.IsMatch(Path.GetFileName(s), re)) yield return s;
+            }
+        }
+    }
+
+    static bool IsCaseSensitive()
+    {
+        var runtimeInformationType = Type.GetType("System.Runtime.InteropServices.RuntimeInformation, System.Runtime.InteropServices.RuntimeInformation");
+        var osPlatformType = Type.GetType("System.Runtime.InteropServices.OSPlatform, System.Runtime.InteropServices.RuntimeInformation");
+        if (runtimeInformationType == null || osPlatformType == null) return false; // type is absent on .NETFramework, which runs only on Windows, which is case insensitive
+        var windows = osPlatformType.GetProperty("Windows").GetValue(null);
+        var isWindows = runtimeInformationType.GetMethod("IsOSPlatform").Invoke(null, new[] { windows });
+        return !((bool)isWindows);
+    }
+
 
     static Tuple<LinkedList<PatternPart>,string> CompilePattern(string pattern)
     {

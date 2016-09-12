@@ -38,7 +38,6 @@ Module Module1
         Next
     End Sub
 
-
     Sub TestMetadata()
         Dim fns = IO.Directory.GetFiles("test")
         For Each fn In fns
@@ -117,19 +116,10 @@ Module Module1
                 ' but can't, because that's a valid filename in unix.
 
             Else
-                If cmd.Contains("*") OrElse cmd.Contains("?") Then
-                    Dim globPath = IO.Path.GetDirectoryName(cmd), globMatch = IO.Path.GetFileName(cmd)
-                    If globPath.Contains("*") OrElse globPath.Contains("?") Then Console.WriteLine("Can't match wildcard directory names") : Return Nothing
-                    If globPath = "" Then globPath = IO.Directory.GetCurrentDirectory()
-                    If Not IO.Directory.Exists(globPath) Then Console.WriteLine($"Not found - ""{globPath}""") : Return Nothing
-                    Dim fns = IO.Directory.GetFiles(globPath, globMatch)
-                    If fns.Length = 0 Then Console.WriteLine($"Not found - ""{cmd}""")
-                    r.Fns = If(r.Fns, New List(Of String))
-                    r.Fns.AddRange(fns)
-                Else
-                    r.Fns = If(r.Fns, New List(Of String))
-                    If IO.File.Exists(cmd) Then r.Fns.Add(cmd) Console.WriteLine($"Not found - ""{cmd}""")
-                End If
+                Dim fns = Glob(cmd).ToList()
+                If fns.Count = 0 Then Console.WriteLine($"Not found - ""{cmd}""")
+                r.Fns = If(r.Fns, New List(Of String))
+                r.Fns.AddRange(fns)
             End If
         End While
 
@@ -155,6 +145,22 @@ Module Module1
         Return r
     End Function
 
+
+    Iterator Function Glob(path As String, Optional forFiles As Boolean = True) As IEnumerable(Of String)
+        If path = "" AndAlso forFiles Then Throw New ArgumentException(NameOf(path))
+        If path = "" Then Yield IO.Directory.GetCurrentDirectory() : Return
+        If Not forFiles AndAlso Not path.Contains("*") AndAlso Not path.Contains("?") Then Yield path : Return
+        Dim pbase = IO.Path.GetDirectoryName(path), pmask = IO.Path.GetFileName(path)
+        For Each directory In Glob(pbase, False)
+            If pmask = ".." Then Yield IO.Path.GetDirectoryName(directory) : Continue For
+            If pmask = "." Then Yield directory : Continue For
+            Dim re = "^" & Text.RegularExpressions.Regex.Escape(pmask).Replace("\*", ".*").Replace("\?", ".") & "$"
+            re = "(?i)" & re
+            For Each s In If(forFiles, IO.Directory.GetFiles(directory), IO.Directory.GetDirectories(directory))
+                If Text.RegularExpressions.Regex.IsMatch(IO.Path.GetFileName(s), re) Then Yield s
+            Next
+        Next
+    End Function
 
     Function CompilePattern(pattern As String) As Tuple(Of LinkedList(Of PatternPart), String)
         ' Filename heuristics:
