@@ -5,11 +5,11 @@ import datetime
 import re
 import os
 import io
-from typing import Tuple, Optional, List, IO, Dict
 import urllib.request
 import threading
 import hashlib
 import xml.etree.ElementTree as ET
+from typing import Tuple, Optional, List, IO, Dict
 
 def parse_iso6709(s : str) -> Optional[Tuple[float,float]]:
     # https://en.wikipedia.org/wiki/ISO_6709
@@ -542,10 +542,9 @@ def get_place_from_latlon(latlon : Tuple[float, float]) -> str:
         if len(words) > 0:
             unique.append(" ".join(words))
 
-    # 7. state/country
-    if state is not None:
+    if state is not None and state not in unique:
         unique.append(state)
-    if country is not None and (state is None or (country != 'United States' and country != 'United Kingdom')):
+    if country is not None and (state is None or (country != 'United States' and country != 'United Kingdom')) and country not in unique:
         unique.append(country)
 
     # Sanitize
@@ -575,7 +574,7 @@ def test_iso6709():
     assert(parse_iso6709("+35.658632+139.745411/") == (35.658632,139.745411))
 
 def test_metadata():
-    dir = os.path.abspath(os.path.join(os.path.dirname(__file__),'..','test'))
+    dir = os.path.abspath(os.path.join(os.path.dirname(__file__),'test'))
     assert(get_date_latlon(os.path.join(dir,'eg-android - 2013.11.23 - 12.49 PST.mp4')) == (datetime.datetime(2013,11,23,20,49,51), None, 'metadata only has UTC time'))
     assert(get_date_latlon(os.path.join(dir,'eg-android - 2013.12.28 - 15.48 PST.jpg')) == (datetime.datetime(2013,12,28,15,48,42), None, None))
     assert(get_date_latlon(os.path.join(dir,'eg-android - 2013.12.28 - 15.48 PST.mp4')) == (datetime.datetime(2013,12,28,23,48,57), None, 'metadata only has UTC time'))
@@ -631,7 +630,7 @@ def test_place():
     assert(get_place_from_latlon((-33.85733, 151.21516)) == 'Playhouse Theatre, Sydney Opera House, Upper Podium, New South Wales, Australia')
     assert(get_place_from_latlon((27.17409, 78.04171)) == 'Taj Mahal Garden, Agra, Ganga Yamuna River Basin, Uttar Pradesh, India')
     assert(get_place_from_latlon((39.91639, 116.39023)) == 'Forbidden City, Xicheng District, Old, Beijing, China')
-    assert(get_place_from_latlon((13.41111, 103.86234)) == 'Angkor Wat, Siem Reap, Siem Reap, Cambodia')
+    assert(get_place_from_latlon((13.41111, 103.86234)) == 'Angkor Wat, Siem Reap, Cambodia')
 
 if len(sys.argv) <= 1:
     print(f'Usage: {os.path.basename(__file__)} [files]')
@@ -645,7 +644,11 @@ elif sys.argv[1] == '--test':
     test_iso6709()
     test_metadata()
     test_place()
+elif sys.argv[1] == '--debug':
+    # I stick in here whatever I'm debugging at the moment
+    print(get_place_from_latlon((47.639483, -122.29801)))
 else:
+    (count_processed, count_error, count_renamed) = (0, 0, 0)
     for src in sys.argv[1:]:    
         (dir, srcname) = os.path.split(src)
         (srcname, ext) = os.path.splitext(srcname)
@@ -653,10 +656,13 @@ else:
         match = pattern.match(srcname)
         stuff = match.group(1) if match else srcname
         (date, latlon, err) = get_date_latlon(src)
+        count_processed += 1
         if date is None:
             print(f'{srcname}{ext}  *** {err}', file=sys.stderr)
+            count_error += 1
             continue
         stuff = stuff if latlon is None else get_place_from_latlon(latlon)
+        # in case of filename clash, we'll append a suffix
         suffix = 0
         while True:
             dstname = f'{date.strftime("%Y.%m.%d - %H.%M.%S")} - {stuff}{"" if suffix == 0 else " "+str(suffix)}'
@@ -665,6 +671,11 @@ else:
                 suffix += 1
             else:
                 break
-        print(f'{dstname}{ext}{"  *** " + err if err is not None else ""}', file=sys.stderr if err is not None else sys.stdout)
         if src != dst:
+            print(f'{dstname}{ext}{"  *** " + err if err is not None else ""}', file=sys.stderr if err is not None else sys.stdout)
             os.rename(src, dst)
+            count_renamed += 1
+    if count_processed == 0:
+        print(f'No files to process', file=sys.stderr)
+    elif count_error == 0 and count_renamed == 0:
+        print(f'All {count_processed} photos were already correctly named', file=sys.stderr)
