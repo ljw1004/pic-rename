@@ -6,8 +6,13 @@ import re
 import os
 import io
 import urllib.request
+import urllib.error
+import urllib.parse
 import threading
 import hashlib
+import traceback
+import time
+import socket
 import xml.etree.ElementTree as ET
 from typing import Tuple, Optional, List, IO, Dict
 
@@ -435,7 +440,7 @@ def get_png_date_latlon(file: IO[bytes], pos:int, end:int) -> Tuple[Optional[dat
                     date = value_date
             except:
                 continue
-    return (date,None,'No eXIf or date: found in PNG' if date is None else None)
+    return (date,None,'No eXIf or date found in PNG' if date is None else None)
 
 def get_date_latlon(src : str) -> Tuple[Optional[datetime.datetime], Optional[Tuple[float, float]], Optional[str]]:
     # some file format pointers: http://nokiatech.github.io/heif/technical.html
@@ -458,37 +463,71 @@ def get_date_latlon(src : str) -> Tuple[Optional[datetime.datetime], Optional[Tu
     except Exception as e:
         return (None, None, f'unable to open {e}')
 
-def urlopen_and_retry_on_429_busy(url : str) -> bytes:
-    cache = f'/tmp/cache_{hashlib.md5(url.encode()).hexdigest()}'
+def urlopen_and_retry_on_busy(url : str) -> bytes:
+    try:
+        os.makedirs('/tmp/pic-rename')
+    except OSError:
+        pass
+    cache = f'/tmp/pic-rename/cache_{hashlib.md5(url.encode()).hexdigest()}'
     try:
         with open(cache,"rb") as file:
             return file.read()
     except:
-        with urllib.request.urlopen(url) as response:
-            content = response.read()
-            with open(cache,"wb") as file:
-                file.write(content)
-            return content
+        pass
+    while True:
+        reason : Optional[str] = None
+        try:
+            with urllib.request.urlopen(url) as response:
+                content = response.read()
+                with open(cache,"wb") as file:
+                    file.write(content)
+                return content
+        except urllib.error.HTTPError as e:
+            if e.code == 429 or e.code == 504: # 429=too many requests, 504=gateway timeout
+                reason = f'{e.code} {str(e.reason)}'
+            elif isinstance(e.reason, socket.timeout):
+                reason = f'HTTPError socket.timeout {e.reason} - {e}'
+            else:
+                raise
+        except urllib.error.URLError as e:
+            if isinstance(e.reason, socket.timeout):
+                reason = f'URLError socket.timeout {e.reason} - {e}'
+            else:
+                raise
+        except socket.timeout as e:
+            reason = f'socket.timeout {e}'
+        except:
+            raise
+        netloc = urllib.parse.urlsplit(url).netloc # e.g. nominatim.openstreetmap.org
+        print(f'*** {netloc} {reason}; will retry', file=sys.stderr)
+        time.sleep(5)
+
 
 def get_place_from_latlon(latlon : Tuple[float, float]) -> str:
     (lat, lon) = latlon
-    parts : List[Tuple[Optional[str],str]] = []
+    parts : List[Tuple[str,str]] = []
 
     # Nominatim has pretty good breakdowns
+    parts1 : List[Tuple[str,str]] = []
     url1 = f'http://nominatim.openstreetmap.org/reverse?accept-language=en&format=xml&lat={lat:0.7f}&lon={lon:0.7f}&zoom=18'
-    raw1 = urlopen_and_retry_on_429_busy(url1)
+    raw1 = urlopen_and_retry_on_busy(url1)
     xml1 = ET.fromstring(raw1) # e.g. <reversegeocode><result>Here</result><addressparts><road>Here</road><country>There</country></addressparts></reversegeocode>
     summary1 = xml1.findtext(".//result")
     result1 = xml1.find(".//result")
     addressparts1 = xml1.find(".//addressparts")
-    for part1 in (list(addressparts1) if addressparts1 is not None else []):
-        if part1.text is not None:
-            parts.append((part1.tag, part1.text))
+    for apart in (list(addressparts1) if addressparts1 is not None else []):
+        if apart.text is not None:
+            atag = 'tourism' if apart.tag in ['leisure', 'aeroway', 'historic'] else 'amenity' if apart.tag in ['building', 'shop', 'retail'] else 'suburb' if apart.tag in ['hamlet'] else apart.tag
+            parts1.append((atag, apart.text))
+    # I disagree with the way London is stored...
+    if ('state_district', 'Greater London') in parts1:
+        parts1.append(('city','London'))
+    
 
-    # Overpass provides some additional tags that are sometimes missing from Nominatim. Here's how it's structured:
-    # https://wiki.openstreetmap.org/wiki/Tag:boundary%3Dadministrative#11_admin_level_values_for_specific_countries
+    # Overpass provides some additional tags that are sometimes missing from Nominatim.
+    parts2 : List[Tuple[str,str]] = []
     url2 = f'http://overpass-api.de/api/interpreter?data=is_in({lat:0.7f},{lon:0.7f});out;'
-    raw2 = urlopen_and_retry_on_429_busy(url2)
+    raw2 = urlopen_and_retry_on_busy(url2)
     xml2 = ET.fromstring(raw2)
     for area in xml2.iterfind(".//area"):  # e.g. <area><tag k="admin_level" v="1"/><tag k="name" v='Creedon"/></area>
         tags : Dict[str,str] = { tag.get('k','_') : tag.get('v','_') for tag in area.iterfind(".//tag") if tag.get('k') is not None and tag.get('v') is not None} # {type:boundary, boundary:administrative, admin_level:1, name:fred}
@@ -499,19 +538,23 @@ def get_place_from_latlon(latlon : Tuple[float, float]) -> str:
         if name is None:
             pass
         elif area_type == 'boundary' and boundary == 'administrative' and admin_level is not None:
-            parts.append((f'{admin_level}', name))
-        elif tags.get('leisure') is not None or tags.get('tourism') is not None or tags.get('building') is not None or tags.get('amenity') is not None:
-            parts.append(('tourism', name))
-        elif area_type == 'site' or area_type == 'multipolygon':
-            parts.append((f'multipolygon', name))
+            parts2.append((f'{admin_level}', name))
+        elif tags.get('building') is not None or tags.get('amenity') is not None:
+            parts2.append(('amenity', name))
+        elif tags.get('leisure') is not None or tags.get('tourism') is not None:
+            parts2.append(('tourism', name))
+        elif area_type == 'site' or (area_type == 'multipolygon' and name != 'Great Britain'):
+            parts2.append((f'multipolygon', name))
 
     # Assemble all this into a name. Our challenge is to use heuristics that capture only the
     # key human-centric parts, and omit redundant information
+    # https://wiki.openstreetmap.org/wiki/Tag:boundary%3Dadministrative#11_admin_level_values_for_specific_countries
+    parts = [*parts1, *parts2]
     partsdic = { key:val for (key,val) in parts}
-    amenities : List[str] = list(name for (key,name) in parts if key == 'amenity' and ('tourism', name) not in parts)
+    amenities : List[str] = list(name for (key,name) in parts if key == 'amenity')
     house_number = (partsdic['house_number']+' ') if 'house_number' in partsdic else ''
     road : Optional[str] = (house_number + partsdic['road']) if 'road' in partsdic else None
-    tourism : List[str] = list(name for (key,name) in parts if key == 'tourism')
+    tourism : List[str] = list(name for (key,name) in parts if key == 'tourism' and ('amenity', name) not in parts)
     suburb_candidates : List[Optional[str]] = [partsdic.get('neighbourhood'), partsdic.get('neighborhood'), partsdic.get('suburb'), partsdic.get('10'), partsdic.get('9')]
     suburb : Optional[str] = next((suburb for suburb in suburb_candidates if suburb is not None), None)
     city_candidates : List[Optional[str]] = [partsdic.get('town'), partsdic.get('city'), partsdic.get('8'), partsdic.get('7'), partsdic.get('county'), partsdic.get('6')]
@@ -522,12 +565,16 @@ def get_place_from_latlon(latlon : Tuple[float, float]) -> str:
     country_candidates : List[Optional[str]] = [partsdic.get('country'), partsdic.get('2')]
     country : Optional[str] = next((country for country in country_candidates if country is not None), None)
 
+    # Amenities, tourism and particularly multipolygons are always the most interesting parts -
+    # they represent human-centric boundaries that are so important that someone went to the trouble
+    # of manually marking them out and entering them into the databases.
     keyparts : List[str] = []
+    preferSuburbOverRoad : Optional[bool] = None if len(tourism)>0 else True if len(amenities)>0 else False
     keyparts.extend(amenities)
-    if road is not None and len(amenities) == 0 and len(tourism) == 0:
+    if road is not None and (preferSuburbOverRoad == False or (preferSuburbOverRoad == True and suburb is None)):
         keyparts.append(road)
     keyparts.extend(tourism)
-    if len(tourism) == 0 and (road is None or len(amenities) > 0) and suburb is not None:
+    if suburb is not None and (preferSuburbOverRoad == True or (preferSuburbOverRoad == False and road is None)):
         keyparts.append(suburb)
     if city is not None:
         keyparts.append(city)
@@ -536,9 +583,11 @@ def get_place_from_latlon(latlon : Tuple[float, float]) -> str:
     # To avoid repetition, remove all words that appear earlier too
     preceding : List[str] = []
     unique = []
+    strip_parentheses = {ord(forbidden):'' for forbidden in '()[]'}
     for part in keyparts:
-        words = [word for word in part.split() if word not in preceding]
-        preceding.extend(words)
+        words = [word for word in part.split() if word.translate(strip_parentheses) not in preceding]
+        words_for_preceding = [word.translate(strip_parentheses) for word in words]
+        preceding.extend(words_for_preceding)
         if len(words) > 0:
             unique.append(" ".join(words))
 
@@ -549,7 +598,7 @@ def get_place_from_latlon(latlon : Tuple[float, float]) -> str:
 
     # Sanitize
     place = ", ".join(unique)
-    place = place.translate({ord(forbidden):None for forbidden in '\\/?%*?:|'})
+    place = place.translate({ord(forbidden):' ' for forbidden in '\\/?%*?:|'}).replace('  ',' ')
     place = place[:120]
     return place
 
@@ -582,6 +631,7 @@ def test_metadata():
     assert(get_date_latlon(os.path.join(dir,'eg-canon-ixus - 2013.12.15 - 07.30 PST.mov')) == (datetime.datetime(2013, 12, 15, 7, 30, 58), None, None))
     assert(get_date_latlon(os.path.join(dir,'eg-canon-powershot - 2013.12.28 - 15.51 PST.jpg')) == (datetime.datetime(2013, 12, 28, 15, 51, 11), None, None))
     assert(get_date_latlon(os.path.join(dir,'eg-canon-powershot - 2013.12.28 - 15.51 PST.mov')) == (datetime.datetime(2013, 12, 28, 15, 51, 27), None, None))
+    assert(get_date_latlon(os.path.join(dir,'eg-depstech - 2020.01.20 - 20.40 PST.jpg')) == (None, None, 'exif lacks times'))
     assert(get_date_latlon(os.path.join(dir,'eg-iphone4s - 2013.12.28 - 15.49 PST.jpg')) == (datetime.datetime(2013, 12, 28, 15, 50, 10), None, None))
     assert(get_date_latlon(os.path.join(dir,'eg-iphone4s - 2013.12.28 - 15.49 PST.mov')) == (datetime.datetime(2013, 12, 28, 15, 50, 22, tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=57600))), None, None))
     assert(get_date_latlon(os.path.join(dir,'eg-iphone5 - 2013.12.09 - 15.21 PST.mov')) == (datetime.datetime(2013, 12, 9, 15, 21, 37, tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=57600))), None, None))
@@ -592,7 +642,7 @@ def test_metadata():
     assert(get_date_latlon(os.path.join(dir,'eg-iphonexs - 2021.01.17 - 20.29 PST.mov')) == (datetime.datetime(2021, 1, 16, 20, 29, 24, tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=57600))), (46.7888, -124.0958), None))
     assert(get_date_latlon(os.path.join(dir,'eg-iphonexs-memory - 2021.01.25 - 19.15 PST.mov')) == (datetime.datetime(2021, 1, 26, 3, 15, 25), None, 'metadata only has UTC time'))
     assert(get_date_latlon(os.path.join(dir,'eg-notapic.txt')) == (None, None, "unrecognized header b'This is '"))
-    assert(get_date_latlon(os.path.join(dir,'eg-screenshot.png')) == (None, None, 'No eXIf or date: found in PNG'))
+    assert(get_date_latlon(os.path.join(dir,'eg-screenshot.png')) == (None, None, 'No eXIf or date found in PNG'))
     assert(get_date_latlon(os.path.join(dir,'eg-sony-cybershot - 2013.12.15 - 07.30 PST.jpg')) == (datetime.datetime(2013, 12, 15, 7, 32, 37), None, None))
     assert(get_date_latlon(os.path.join(dir,'eg-sony-cybershot - 2013.12.15 - 07.30 PST.mp4')) == (datetime.datetime(2013, 12, 15, 7, 31, 51), None, None))
     assert(get_date_latlon(os.path.join(dir,'eg-wm10-gps.jpg')) == (datetime.datetime(2016, 2, 15, 22, 20, 58), (47.63564167544167, -122.30185414664444), None))
@@ -608,10 +658,10 @@ def test_place():
     assert(get_place_from_latlon((47.65076, -122.302043)) == 'Husky Football Stadium, University of Washington, Seattle, Washington')
     assert(get_place_from_latlon((47.668719, -122.38296)) == 'Washington Federal Bank, Ballard, Seattle, Washington')
     assert(get_place_from_latlon((47.681006, -122.407513)) == 'Shilshole Bay Marina, Seattle, Washington')
-    assert(get_place_from_latlon((47.620415, -122.349463)) == 'Seattle Center, Space Needle, Washington')
+    assert(get_place_from_latlon((47.620415, -122.349463)) == 'Space Needle, Seattle Center, Washington')
     assert(get_place_from_latlon((47.609839, -122.342981)) == 'Pike Place Market, Seattle, street, Washington')
-    assert(get_place_from_latlon((47.65464, -122.30843)) == 'University of Washington, Seattle, Washington')
-    assert(get_place_from_latlon((47.64529, -122.13064)) == 'Microsoft Building 25, Redmond, East Campus, Washington')
+    assert(get_place_from_latlon((47.65464, -122.30843)) == 'University of Washington, District, Seattle, Washington')
+    assert(get_place_from_latlon((47.64529, -122.13064)) == 'Microsoft Building 25, Northeast 39th Street, Redmond, East Campus, Washington')
     assert(get_place_from_latlon((48.67998, -123.23106)) == 'Lighthouse Road, San Juan County, Washington')
     assert(get_place_from_latlon((21.97472, -159.3656)) == 'Umi Street, Lihue, Kauai, Hawaiian Islands, Southwestern, Hawaii')
     assert(get_place_from_latlon((22.08223, -159.76265)) == 'Polihale State Park, Kauaʻi County, Kauai, Hawaiian Islands, Southwestern, Beach, Hawaii')
@@ -620,17 +670,77 @@ def test_place():
     assert(get_place_from_latlon((48.56686, -123.46688)) == 'The Butchart Gardens, Central Saanich, Vancouver Island, British Columbia, Canada')
     assert(get_place_from_latlon((48.65287, -123.34463)) == 'Gulf Islands National Park Reserve, Southern Electoral Area, Sidney Island, British Columbia, Canada')
     # Europe
-    assert(get_place_from_latlon((57.14727, -2.095665)) == 'Union Street, Aberdeen, Great Britain, Scotland')
-    assert(get_place_from_latlon((57.169365, -2.101216)) == '16 The Chanonry, Aberdeen, Great Britain, Scotland')
-    assert(get_place_from_latlon((52.20234, 0.11589)) == 'Queens\' College (University of Cambridge), Cambridge, Great Britain, England')
-    assert(get_place_from_latlon((48.858262, 2.293763)) == 'Champ de Mars, Eiffel Tower, Paris, Ile-de-France, France')
-    assert(get_place_from_latlon((41.900914, 12.483172)) == 'Trevi Fountain, Fontana di, Rome, Rione II, Lazio, Italy')
+    assert(get_place_from_latlon((57.14727, -2.095665)) == 'Union Street, Aberdeen, Scotland')
+    assert(get_place_from_latlon((57.169365, -2.101216)) == '16 The Chanonry, Aberdeen, Scotland')
+    assert(get_place_from_latlon((52.20234, 0.11589)) == 'Queens\' College (University of Cambridge), Newnham, England')
+    assert(get_place_from_latlon((48.858262, 2.293763)) == 'Eiffel Tower, Champ de Mars, Paris, Ile-de-France, France')
+    assert(get_place_from_latlon((41.900914, 12.483172)) == 'Trevi Fountain, Fontana di, Municipio Roma I, Rome, Rione II, Lazio, Italy')
     # Australasia
     assert(get_place_from_latlon((-27.5014, 152.97272)) == 'Indooroopilly Shopping Centre, Brisbane City, Queensland, Australia')
     assert(get_place_from_latlon((-33.85733, 151.21516)) == 'Playhouse Theatre, Sydney Opera House, Upper Podium, New South Wales, Australia')
     assert(get_place_from_latlon((27.17409, 78.04171)) == 'Taj Mahal Garden, Agra, Ganga Yamuna River Basin, Uttar Pradesh, India')
     assert(get_place_from_latlon((39.91639, 116.39023)) == 'Forbidden City, Xicheng District, Old, Beijing, China')
     assert(get_place_from_latlon((13.41111, 103.86234)) == 'Angkor Wat, Siem Reap, Cambodia')
+    # Amenity/tourism/suburb
+    assert(get_place_from_latlon((47.62676944444444, -122.30770833333332)) == 'Saint Joseph Catholic Church, Capitol Hill, Seattle, Washington')
+    assert(get_place_from_latlon((47.62659166666667, -122.30788333333334)) == 'Saint Joseph Catholic Church, Capitol Hill, Seattle, Washington')
+    assert(get_place_from_latlon((47.6264, -122.3079)) == 'Saint Joseph School, Capitol Hill, Seattle, Washington')
+    assert(get_place_from_latlon((47.62603888888889, -122.30757222222222)) == 'Saint Joseph School, Capitol Hill, Seattle, Washington')
+    assert(get_place_from_latlon((47.66171666666666, -122.29951388888888)) == 'South Garage, University Village, District, Seattle, Washington')
+    assert(get_place_from_latlon((47.66166388888889, -122.29971388888889)) == 'South Garage, University Village, District, Seattle, Washington')
+    assert(get_place_from_latlon((47.59358888888889, -122.31080555555555)) == 'Seattle Bouldering Project - SBP, Washington')
+    # Slashes and parentheses
+    assert(get_place_from_latlon((47.593136111111114, -122.33296944444444)) == 'Lumen Field Event Center, International District Chinatown, Seattle, Washington')
+    assert(get_place_from_latlon((47.59296388888889, -122.33313055555556)) == 'WaMu Theater, International District Chinatown, Seattle, Washington')
+    assert(get_place_from_latlon((46.976708333333335, -120.17369722222223)) == 'L. T. Murray Wildlife Area (Whiskey Dick Unit), Kittitas County, Washington')
+    # Amenity/buildings/shops/retail/hamlet/historic
+    assert(get_place_from_latlon((47.82781944444445, -122.29219166666667)) == 'Lynnwood Recreation Center, Washington')
+    assert(get_place_from_latlon((47.82130555555556, -122.29823333333333)) == 'Arco, 4806 196th Street Southwest, Lynnwood, Washington')
+    assert(get_place_from_latlon((47.62366111111111, -122.33089444444444)) == 'Playdate SEA, South Lake Union, Seattle, Washington')
+    assert(get_place_from_latlon((47.623675, -122.33113055555555)) == 'Playdate SEA, Seattle, Washington')
+    assert(get_place_from_latlon((47.628819444444446, -122.34288888888888)) == 'Dexter Station, Westlake, Seattle, Washington')
+    assert(get_place_from_latlon((47.62863611111111, -122.34264444444445)) == 'Dexter Station, Westlake, Seattle, Washington')
+    assert(get_place_from_latlon((47.628825, -122.3429111111111)) == 'Dexter Station, Westlake, Seattle, Washington')
+    assert(get_place_from_latlon((47.629019444444445, -122.34124722222222)) == 'Facebook Westlake, Seattle, Washington')
+    assert(get_place_from_latlon((47.61843611111111, -122.13038611111111)) == 'WiggleWorks Kids, Bellevue, Washington')
+    assert(get_place_from_latlon((47.61853055555556, -122.1305)) == 'Crossroads, Lake Hills, Bellevue, Washington')
+    assert(get_place_from_latlon((47.662302777777775, -122.29841666666667)) == 'University Village, Coming Home, Seattle, Washington')
+    assert(get_place_from_latlon((55.527425, -5.504425)) == 'Saddell Castle, Campbeltown, Scotland')
+    assert(get_place_from_latlon((55.52716111111111, -5.505125)) == 'Saddell Castle, Campbeltown, Scotland')
+    assert(get_place_from_latlon((55.527375, -5.503855555555556)) == 'Saddell Castle, Campbeltown, Firth of Clyde, Scotland')
+    assert(get_place_from_latlon((55.42015, -5.604105555555555)) == 'Campbeltown Hospital, Dalintober, Scotland')
+    assert(get_place_from_latlon((55.42106666666666, -5.603566666666667)) == 'Campbeltown Hospital, Dalintober, Scotland')
+    assert(get_place_from_latlon((55.526913888888885, -5.504155555555555)) == 'Saddell Castle, Campbeltown, Firth of Clyde, Scotland')
+    assert(get_place_from_latlon((55.424375, -5.6054916666666665)) == 'Bank of Scotland, Dalintober, Campbeltown, Scotland')
+    assert(get_place_from_latlon((55.42735277777778, -5.605638888888889)) == 'Aqualibrum, Kinloch Public Park, Campbeltown, Scotland')
+    # Park
+    assert(get_place_from_latlon((47.54087777777777, -122.48220833333333)) == 'WA State Parks, Blake Island Marine Park, Kitsap County, Washington')
+    assert(get_place_from_latlon((47.54085277777778, -122.48735833333333)) == 'Blake Island Marine State Park, Kitsap County, Washington')
+    assert(get_place_from_latlon((47.5409, -122.4813)) == 'Blake Island Marine State Park Campground, Kitsap County, Washington')
+    assert(get_place_from_latlon((47.540863888888886, -122.48208611111112)) == 'Blake Island Marine State Park Campground, Kitsap County, Washington')
+    assert(get_place_from_latlon((47.6324, -122.3132)) == 'Volunteer Park Playground, Seattle, Washington')
+    assert(get_place_from_latlon((47.632, -122.31341666666667)) == 'Volunteer Park Playground, Seattle, Washington')
+    assert(get_place_from_latlon((47.64170555555555, -122.30924166666667)) == 'Montlake Playfield, Seattle, Washington')
+    assert(get_place_from_latlon((47.6417, -122.3094)) == 'Montlake Community Center, Playfield, Seattle, Washington')
+    assert(get_place_from_latlon((47.681777777777775, -122.24568888888889)) == 'The Fin Project From Swords into Plowshares, Seattle, Lake Washington, Washington')
+    assert(get_place_from_latlon((47.632191666666664, -122.29533333333333)) == 'Birches & Poplars, Washington Park Arboretum, Seattle, Washington')
+    assert(get_place_from_latlon((47.633716666666665, -122.29625833333333)) == 'Birches & Poplars, Washington Park Arboretum, Seattle, Washington')
+    # Wilderness
+    assert(get_place_from_latlon((47.2781, -121.3185)) == 'Meany Lodge, Kittitas County, Okanogan-Wenatchee National Forest, Washington')
+    assert(get_place_from_latlon((47.28511944444444, -121.31588611111111)) == 'Forest Road 5400-420, Kittitas County, Okanogan-Wenatchee National, Washington')
+    assert(get_place_from_latlon((47.30723611111111, -121.31594166666666)) == 'Forest Road 54, Kittitas County, Okanogan-Wenatchee National, Washington')
+    # London
+    assert(get_place_from_latlon((51.470875, -0.4868722222222222)) == 'Heathrow Terminal 5, Wayfarer Road, London, England')
+    assert(get_place_from_latlon((51.481030555555556, -0.1787638888888889)) == 'Dartrey Walk, Worlds End, London, England')
+    assert(get_place_from_latlon((51.51676111111111, -0.13645277777777778)) == 'The London EDITION, England')
+    assert(get_place_from_latlon((51.51674166666667, -0.13426944444444444)) == '1 Rathbone Square, London, England')
+    assert(get_place_from_latlon((51.5176, -0.1371)) == 'Sanderson Hotel, Fitzrovia, London, England')
+    assert(get_place_from_latlon((51.51056944444444, -0.13133611111111113)) == 'M&M\'s World, St. James\'s, London, England')
+    assert(get_place_from_latlon((51.51022777777778, -0.13242500000000001)) == 'W1D 111;W1D 311, St. James\'s, London, England')
+    assert(get_place_from_latlon((51.513755555555555, -0.13956388888888888)) == 'Shakespeare\'s Head, Soho, London, England')
+    assert(get_place_from_latlon((51.51390555555555, -0.13997777777777778)) == 'Liberty, Soho, London, England')
+    assert(get_place_from_latlon((51.51343611111111, -0.07898333333333334)) == 'Guild Church of St Katharine Cree, 86 Leadenhall Street, London, England')
+
 
 if len(sys.argv) <= 1:
     print(f'Usage: {os.path.basename(__file__)} [files]')
@@ -648,34 +758,37 @@ elif sys.argv[1] == '--debug':
     # I stick in here whatever I'm debugging at the moment
     print(get_place_from_latlon((47.639483, -122.29801)))
 else:
-    (count_processed, count_error, count_renamed) = (0, 0, 0)
-    for src in sys.argv[1:]:    
-        (dir, srcname) = os.path.split(src)
-        (srcname, ext) = os.path.splitext(srcname)
-        pattern = re.compile('^\d\d\d\d.\d\d.\d\d - \d\d.\d\d.\d\d - (.*)$')
-        match = pattern.match(srcname)
-        stuff = match.group(1) if match else srcname
-        (date, latlon, err) = get_date_latlon(src)
-        count_processed += 1
-        if date is None:
-            print(f'{srcname}{ext}  *** {err}', file=sys.stderr)
-            count_error += 1
-            continue
-        stuff = stuff if latlon is None else get_place_from_latlon(latlon)
-        # in case of filename clash, we'll append a suffix
-        suffix = 0
-        while True:
-            dstname = f'{date.strftime("%Y.%m.%d - %H.%M.%S")} - {stuff}{"" if suffix == 0 else " "+str(suffix)}'
-            dst = os.path.join(dir, dstname+ext)
-            if os.path.exists(dst) and src != dst:
-                suffix += 1
-            else:
-                break
-        if src != dst:
-            print(f'{dstname}{ext}{"  *** " + err if err is not None else ""}', file=sys.stderr if err is not None else sys.stdout)
-            os.rename(src, dst)
-            count_renamed += 1
-    if count_processed == 0:
-        print(f'No files to process', file=sys.stderr)
-    elif count_error == 0 and count_renamed == 0:
-        print(f'All {count_processed} photos were already correctly named', file=sys.stderr)
+    try:
+        (count_processed, count_error, count_renamed) = (0, 0, 0)
+        for src in sys.argv[1:]:    
+            (dir, srcname) = os.path.split(src)
+            (srcname, ext) = os.path.splitext(srcname)
+            pattern = re.compile('^\d\d\d\d.\d\d.\d\d - \d\d.\d\d.\d\d - (.*)$')
+            match = pattern.match(srcname)
+            stuff = match.group(1) if match else srcname
+            (date, latlon, err) = get_date_latlon(src)
+            count_processed += 1
+            if date is None:
+                print(f'{srcname}{ext}  *** {err}', file=sys.stderr)
+                count_error += 1
+                continue
+            stuff = stuff if latlon is None else get_place_from_latlon(latlon)
+            # in case of filename clash, we'll append a suffix
+            suffix = 1
+            while True:
+                dstname = f'{date.strftime("%Y.%m.%d - %H.%M.%S")} - {stuff}{"" if suffix == 1 else " "+str(suffix)}'
+                dst = os.path.join(dir, dstname+ext)
+                if os.path.exists(dst) and src != dst:
+                    suffix += 1
+                else:
+                    break
+            if src != dst:
+                print(f'{dstname}{ext}{"  *** " + err if err is not None else ""}', file=sys.stderr if err is not None else sys.stdout)
+                os.rename(src, dst)
+                count_renamed += 1
+        if count_processed == 0:
+            print(f'No files to process', file=sys.stderr)
+        elif count_error == 0 and count_renamed == 0:
+            print(f'All {count_processed} photos were already correctly named', file=sys.stderr)
+    except KeyboardInterrupt:
+        sys.exit(130) # standard unix exit code for ctrl+c
