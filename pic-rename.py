@@ -15,6 +15,11 @@ import time
 import socket
 import xml.etree.ElementTree as ET
 from typing import Tuple, Optional, List, IO, Dict
+try:
+    import pytz
+except ImportError:
+    pass
+
 
 def parse_iso6709(s : str) -> Optional[Tuple[float,float]]:
     # https://en.wikipedia.org/wiki/ISO_6709
@@ -69,7 +74,7 @@ def read_date(file: IO[bytes], pos:int, nbytes:int) -> Optional[datetime.datetim
     seconds = seconds + TBUG_SECS if seconds < TBUG_SECS else seconds
     return TZERO_1904 + datetime.timedelta(seconds=seconds)
 
-def exif_get_date_latlon_from_bom(file: IO[bytes], pos:int, end:int) -> Tuple[Optional[datetime.datetime], Optional[Tuple[float, float]], Optional[str]]:    
+def exif_get_date_latlon_from_bom(file: IO[bytes], pos:int, end:int) -> Tuple[Optional[datetime.datetime], Optional[datetime.datetime], Optional[Tuple[float, float]], Optional[str]]:    
     latNS : Optional[str] = None
     latEW : Optional[str] = None
     latNum : Optional[float] = None
@@ -83,11 +88,11 @@ def exif_get_date_latlon_from_bom(file: IO[bytes], pos:int, end:int) -> Tuple[Op
 
     exif_bom = read_bytes(file, pos, 4)
     if exif_bom != b'MM\x00*' and exif_bom != b'II*\x00':
-        return (None, None, f'Exif unrecognized BOM {str(exif_bom)}')
+        return (None, None, None, f'Exif unrecognized BOM {str(exif_bom)}')
     byteorder = 'little' if exif_bom == b'II*\x00' else 'big'
     ipos = read_int(file, pos+4, 4, byteorder=byteorder)
     if ipos + 12 >= end:
-        return (None, None, f'Exif marker size wrong')
+        return (None, None, None, f'Exif marker size wrong')
     # Format of EXIF is a chain of IFDs. Each consists of a number of tagged entries.
     # One of the tagged entries may be "SubIFDpos = &H..." which gives the address of the
     # next IFD in the chain; if this entry is absent or 0, then we're on the last IFD.
@@ -167,17 +172,17 @@ def exif_get_date_latlon_from_bom(file: IO[bytes], pos:int, end:int) -> Tuple[Op
         except:
             continue
     if date is None:
-        return (None, None, 'exif lacks times')
+        return (None, None, None, 'exif lacks times')
 
     latlon : Optional[Tuple[float,float]] = None
     if latNum is not None and latNS is not None and lonNum is not None and lonEW is not None:
         lat = latNum * (1 if latNS == 'N' else -1)
         lon = lonNum * (1 if latEW == 'E' else -1)
         latlon = (lat, lon)
-    return (date, latlon, None)
+    return (date, None, latlon, None)
 
 
-def get_exif_date_latlon(file: IO[bytes], pos:int, end:int) -> Tuple[Optional[datetime.datetime], Optional[Tuple[float, float]], Optional[str]]:
+def get_exif_date_latlon(file: IO[bytes], pos:int, end:int) -> Tuple[Optional[datetime.datetime], Optional[datetime.datetime], Optional[Tuple[float, float]], Optional[str]]:
     # https://www.wikidata.org/wiki/Q26381818
     # http://cipa.jp/std/documents/e/DC-008-2012_E_C.pdf
     h1 = read_int(file, pos, 2)  # expected to be 0xFFD8, "SOI" StartOfImage
@@ -185,14 +190,14 @@ def get_exif_date_latlon(file: IO[bytes], pos:int, end:int) -> Tuple[Optional[da
     while True: # iterate through EXIF markers
         mbuf = pos
         if mbuf+4 > end:
-            return (None, None, f'did not find TIFF Exif block')
+            return (None, None, None, f'did not find TIFF Exif block')
         marker = read_int(file, mbuf+0, 2)
         msize = read_int(file, mbuf+2, 2)
         if mbuf + msize > end:
-            return (None, None, f'TIFF block size mismatch')
+            return (None, None, None, f'TIFF block size mismatch')
         pos += 2+msize
         if marker == 0xFFDA: # image data follows this marker; we can stop our iteration
-            return (None, None, f'did not find TIFF Exif block before image data')
+            return (None, None, None, f'did not find TIFF Exif block before image data')
         if marker != 0xFFE1: # we'll skip non-EXIF markers
             continue
         if msize < 14:
@@ -250,7 +255,7 @@ def debug_print_mp4_hierarchy(file: IO[bytes], pos:int, end:int, prefix:str = ''
             debug_print_mp4_hierarchy(file, box_start, box_end, prefix+'  ')
         pos = box_end
 
-def get_mp4_date_latlon(file: IO[bytes], pos:int, end:int) -> Tuple[Optional[datetime.datetime], Optional[Tuple[float, float]], Optional[str]]:
+def get_mp4_date_latlon(file: IO[bytes], pos:int, end:int) -> Tuple[Optional[datetime.datetime], Optional[datetime.datetime], Optional[Tuple[float, float]], Optional[str]]:
     # official spec: https://mpeg.chiariglione.org/standards/mpeg-4/iso-base-media-file-format/text-isoiec-14496-12-5th-edition
     # readable spec: https://clanmills.com/exiv2/book/
     # Worked example: https://leo-van-stee.github.io/
@@ -366,7 +371,7 @@ def get_mp4_date_latlon(file: IO[bytes], pos:int, end:int) -> Tuple[Optional[dat
                     except:
                         pass
         if date is not None:
-            return (date, latlon, None)    
+            return (date, None, latlon, None)    
 
     # The optional "moov.udta.CNTH" binary blob consists of 8bytes of unknown, followed by EXIF data
     # If present, we'll use that since it provides GPS as well as time.
@@ -399,14 +404,18 @@ def get_mp4_date_latlon(file: IO[bytes], pos:int, end:int) -> Tuple[Optional[dat
         # I'm going to guess that all "MSNV" files come from Sony, and all of them have the bug.
         (ftyp_kind, ftyp, ftyp_end) = mp4_find_box(file, b'ftyp', pos, end)
         major_brand = read_bytes(file, ftyp, 4)  # e.g. "qt" for iphone, "MSNV" for Sony
-        err = 'metadata has empty date' if creation_time_utc is None else None if major_brand == b'MSNV' else 'metadata only has UTC time'
-        return (creation_time_utc, latlon, err)
+        if creation_time_utc is None:
+            return (None, None, latlon, 'mp4 metadata is missing date')
+        elif major_brand == b'MSNV':
+            return (creation_time_utc, None, latlon, None)
+        else:
+            return (None, creation_time_utc, latlon, None)
 
     # There are other optional blocks that may help, e.g. b'\xA9day' contains a local
     # time and a UTC offset on some cameras. But they're rare enough that I won't bother.
-    return (None, None, 'No metadata atoms')
+    return (None, None, None, 'No metadata atoms')
 
-def get_png_date_latlon(file: IO[bytes], pos:int, end:int) -> Tuple[Optional[datetime.datetime], Optional[Tuple[float, float]], Optional[str]]:
+def get_png_date_latlon(file: IO[bytes], pos:int, end:int) -> Tuple[Optional[datetime.datetime], Optional[datetime.datetime], Optional[Tuple[float, float]], Optional[str]]:
     # http://www.libpng.org/pub/png/spec/1.2/PNG-Structure.html#PNG-file-signature
     # http://ftp-osl.osuosl.org/pub/libpng/documents/pngext-1.5.0.html#C.eXIf
     # A series of chunks.
@@ -440,9 +449,12 @@ def get_png_date_latlon(file: IO[bytes], pos:int, end:int) -> Tuple[Optional[dat
                     date = value_date
             except:
                 continue
-    return (date,None,'No eXIf or date found in PNG' if date is None else None)
+    if date is None:
+        return (None, None, None, 'No eXIf or date found in PNG')
+    else:
+        return (date, None, None, None)
 
-def get_date_latlon(src : str) -> Tuple[Optional[datetime.datetime], Optional[Tuple[float, float]], Optional[str]]:
+def get_date_latlon(src : str) -> Tuple[Optional[datetime.datetime], Optional[datetime.datetime], Optional[Tuple[float, float]], Optional[str]]:
     # some file format pointers: http://nokiatech.github.io/heif/technical.html
     # heic: http://cheeky4n6monkey.blogspot.com/2017/10/monkey-takes-heic.html
     try:
@@ -450,7 +462,7 @@ def get_date_latlon(src : str) -> Tuple[Optional[datetime.datetime], Optional[Tu
             file.seek(0, io.SEEK_END)
             fend = file.tell()
             if fend < 8:
-                return (None,None,"file too small")
+                return (None,None,None,"file too small")
             header = read_bytes(file,0,8)
             if header[0:2] == b'\xFF\xD8': # jpeg header
                 return get_exif_date_latlon(file, 0, fend)
@@ -459,9 +471,9 @@ def get_date_latlon(src : str) -> Tuple[Optional[datetime.datetime], Optional[Tu
             elif header[0:8] == b'\x89PNG\x0d\x0a\x1a\x0a':
                 return get_png_date_latlon(file, 0, fend)
             else:
-                return (None,None,f'unrecognized header {str(header)}')
+                return (None,None,None,f'unrecognized header {str(header)}')
     except Exception as e:
-        return (None, None, f'unable to open {e}')
+        return (None,None, None, f'unable to open {e}')
 
 def urlopen_and_retry_on_busy(url : str) -> bytes:
     try:
@@ -503,7 +515,7 @@ def urlopen_and_retry_on_busy(url : str) -> bytes:
         time.sleep(5)
 
 
-def get_place_from_latlon(latlon : Tuple[float, float]) -> str:
+def get_place_tz_from_latlon(latlon : Tuple[float, float]) -> Tuple[str,Optional[datetime.tzinfo]]:
     (lat, lon) = latlon
     parts : List[Tuple[str,str]] = []
 
@@ -521,20 +533,25 @@ def get_place_from_latlon(latlon : Tuple[float, float]) -> str:
             parts1.append((atag, apart.text))
     # I disagree with the way London is stored...
     if ('state_district', 'Greater London') in parts1:
-        parts1.append(('city','London'))
-    
+        parts1.append(('city','London'))    
 
     # Overpass provides some additional tags that are sometimes missing from Nominatim.
     parts2 : List[Tuple[str,str]] = []
     url2 = f'http://overpass-api.de/api/interpreter?data=is_in({lat:0.7f},{lon:0.7f});out;'
     raw2 = urlopen_and_retry_on_busy(url2)
     xml2 = ET.fromstring(raw2)
+    tz2 : Optional[datetime.tzinfo] = None
     for area in xml2.iterfind(".//area"):  # e.g. <area><tag k="admin_level" v="1"/><tag k="name" v='Creedon"/></area>
         tags : Dict[str,str] = { tag.get('k','_') : tag.get('v','_') for tag in area.iterfind(".//tag") if tag.get('k') is not None and tag.get('v') is not None} # {type:boundary, boundary:administrative, admin_level:1, name:fred}
         name = tags.get('name:en') if tags.get('name:en') is not None else tags.get('name')
         area_type = tags.get('type')
         boundary = tags.get('boundary')
         admin_level = int(tags['admin_level']) if 'admin_level' in tags and tags['admin_level'].isdigit() else None
+        if 'timezone' in tags and tz2 is None and 'pytz' in sys.modules:
+            try:
+                tz2 = pytz.timezone(tags['timezone'])
+            except pytz.UnknownTimeZoneError:
+                pass
         if name is None:
             pass
         elif area_type == 'boundary' and boundary == 'administrative' and admin_level is not None:
@@ -600,7 +617,7 @@ def get_place_from_latlon(latlon : Tuple[float, float]) -> str:
     place = ", ".join(unique)
     place = place.translate({ord(forbidden):' ' for forbidden in '\\/?%*?:|'}).replace('  ',' ')
     place = place[:120]
-    return place
+    return (place, tz2)
 
 def test_iso6709():
     assert(parse_iso6709("+46.7888-124.0958+018.337/") == (46.7888,-124.0958))
@@ -624,122 +641,122 @@ def test_iso6709():
 
 def test_metadata():
     dir = os.path.abspath(os.path.join(os.path.dirname(__file__),'test'))
-    assert(get_date_latlon(os.path.join(dir,'eg-android - 2013.11.23 - 12.49 PST.mp4')) == (datetime.datetime(2013,11,23,20,49,51), None, 'metadata only has UTC time'))
-    assert(get_date_latlon(os.path.join(dir,'eg-android - 2013.12.28 - 15.48 PST.jpg')) == (datetime.datetime(2013,12,28,15,48,42), None, None))
-    assert(get_date_latlon(os.path.join(dir,'eg-android - 2013.12.28 - 15.48 PST.mp4')) == (datetime.datetime(2013,12,28,23,48,57), None, 'metadata only has UTC time'))
-    assert(get_date_latlon(os.path.join(dir,'eg-canon-ixus - 2013.12.15 - 07.30 PST.jpg')) == (datetime.datetime(2013, 12, 15, 7, 31, 41), None, None))
-    assert(get_date_latlon(os.path.join(dir,'eg-canon-ixus - 2013.12.15 - 07.30 PST.mov')) == (datetime.datetime(2013, 12, 15, 7, 30, 58), None, None))
-    assert(get_date_latlon(os.path.join(dir,'eg-canon-powershot - 2013.12.28 - 15.51 PST.jpg')) == (datetime.datetime(2013, 12, 28, 15, 51, 11), None, None))
-    assert(get_date_latlon(os.path.join(dir,'eg-canon-powershot - 2013.12.28 - 15.51 PST.mov')) == (datetime.datetime(2013, 12, 28, 15, 51, 27), None, None))
-    assert(get_date_latlon(os.path.join(dir,'eg-depstech - 2020.01.20 - 20.40 PST.jpg')) == (None, None, 'exif lacks times'))
-    assert(get_date_latlon(os.path.join(dir,'eg-iphone4s - 2013.12.28 - 15.49 PST.jpg')) == (datetime.datetime(2013, 12, 28, 15, 50, 10), None, None))
-    assert(get_date_latlon(os.path.join(dir,'eg-iphone4s - 2013.12.28 - 15.49 PST.mov')) == (datetime.datetime(2013, 12, 28, 15, 50, 22, tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=57600))), None, None))
-    assert(get_date_latlon(os.path.join(dir,'eg-iphone5 - 2013.12.09 - 15.21 PST.mov')) == (datetime.datetime(2013, 12, 9, 15, 21, 37, tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=57600))), None, None))
-    assert(get_date_latlon(os.path.join(dir,'eg-iphone5 - 2013.12.10 - 15.40 PST.jpg')) == (datetime.datetime(2013, 12, 10, 15, 39, 54), None, None))
-    assert(get_date_latlon(os.path.join(dir,'eg-iphone6-gps.jpg')) == (datetime.datetime(2016,2,18,21,10,48), (47.63614722222222,-122.30151388888889), None))
-    assert(get_date_latlon(os.path.join(dir,'eg-iphonexs - 2021.01.16 - 07.00 PST.png')) == (datetime.datetime(2021, 1, 16, 7, 0, 51), None, None))
-    assert(get_date_latlon(os.path.join(dir,'eg-iphonexs - 2021.01.17 - 12.18 PST.heic')) == (datetime.datetime(2021, 1, 17, 12, 18, 23, tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=57600))), (46.79380555555555, -124.10501944444444), None))
-    assert(get_date_latlon(os.path.join(dir,'eg-iphonexs - 2021.01.17 - 20.29 PST.mov')) == (datetime.datetime(2021, 1, 16, 20, 29, 24, tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=57600))), (46.7888, -124.0958), None))
-    assert(get_date_latlon(os.path.join(dir,'eg-iphonexs-memory - 2021.01.25 - 19.15 PST.mov')) == (datetime.datetime(2021, 1, 26, 3, 15, 25), None, 'metadata only has UTC time'))
-    assert(get_date_latlon(os.path.join(dir,'eg-notapic.txt')) == (None, None, "unrecognized header b'This is '"))
-    assert(get_date_latlon(os.path.join(dir,'eg-screenshot.png')) == (None, None, 'No eXIf or date found in PNG'))
-    assert(get_date_latlon(os.path.join(dir,'eg-sony-cybershot - 2013.12.15 - 07.30 PST.jpg')) == (datetime.datetime(2013, 12, 15, 7, 32, 37), None, None))
-    assert(get_date_latlon(os.path.join(dir,'eg-sony-cybershot - 2013.12.15 - 07.30 PST.mp4')) == (datetime.datetime(2013, 12, 15, 7, 31, 51), None, None))
-    assert(get_date_latlon(os.path.join(dir,'eg-wm10-gps.jpg')) == (datetime.datetime(2016, 2, 15, 22, 20, 58), (47.63564167544167, -122.30185414664444), None))
-    assert(get_date_latlon(os.path.join(dir,'eg-wm10.mp4')) == (datetime.datetime(2016, 2, 25, 4, 27, 35), (47.6361, -122.3013), 'metadata only has UTC time'))
-    assert(get_date_latlon(os.path.join(dir,'eg-wp8 - 2013.12.15 - 07.33 PST.jpg')) == (datetime.datetime(2013,12,15,7,32,50), (47.63610444444444, -122.30139333333334), None))
-    assert(get_date_latlon(os.path.join(dir,'eg-wp8 - 2013.12.15 - 07.33 PST.mp4')) == (None, None, 'metadata has empty date'))
+    assert(get_date_latlon(os.path.join(dir,'eg-android - 2013.11.23 - 12.49 PST.mp4')) == (None, datetime.datetime(2013,11,23,20,49,51), None, None))
+    assert(get_date_latlon(os.path.join(dir,'eg-android - 2013.12.28 - 15.48 PST.jpg')) == (datetime.datetime(2013,12,28,15,48,42), None, None, None))
+    assert(get_date_latlon(os.path.join(dir,'eg-android - 2013.12.28 - 15.48 PST.mp4')) == (None, datetime.datetime(2013,12,28,23,48,57), None, None))
+    assert(get_date_latlon(os.path.join(dir,'eg-canon-ixus - 2013.12.15 - 07.30 PST.jpg')) == (datetime.datetime(2013, 12, 15, 7, 31, 41), None, None, None))
+    assert(get_date_latlon(os.path.join(dir,'eg-canon-ixus - 2013.12.15 - 07.30 PST.mov')) == (datetime.datetime(2013, 12, 15, 7, 30, 58), None, None, None))
+    assert(get_date_latlon(os.path.join(dir,'eg-canon-powershot - 2013.12.28 - 15.51 PST.jpg')) == (datetime.datetime(2013, 12, 28, 15, 51, 11), None, None, None))
+    assert(get_date_latlon(os.path.join(dir,'eg-canon-powershot - 2013.12.28 - 15.51 PST.mov')) == (datetime.datetime(2013, 12, 28, 15, 51, 27), None, None, None))
+    assert(get_date_latlon(os.path.join(dir,'eg-depstech - 2020.01.20 - 20.40 PST.jpg')) == (None, None, None, 'exif lacks times'))
+    assert(get_date_latlon(os.path.join(dir,'eg-iphone4s - 2013.12.28 - 15.49 PST.jpg')) == (datetime.datetime(2013, 12, 28, 15, 50, 10), None, None, None))
+    assert(get_date_latlon(os.path.join(dir,'eg-iphone4s - 2013.12.28 - 15.49 PST.mov')) == (datetime.datetime(2013, 12, 28, 15, 50, 22, tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=57600))), None, None, None))
+    assert(get_date_latlon(os.path.join(dir,'eg-iphone5 - 2013.12.09 - 15.21 PST.mov')) == (datetime.datetime(2013, 12, 9, 15, 21, 37, tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=57600))), None, None, None))
+    assert(get_date_latlon(os.path.join(dir,'eg-iphone5 - 2013.12.10 - 15.40 PST.jpg')) == (datetime.datetime(2013, 12, 10, 15, 39, 54), None, None, None))
+    assert(get_date_latlon(os.path.join(dir,'eg-iphone6-gps.jpg')) == (datetime.datetime(2016,2,18,21,10,48), None, (47.63614722222222,-122.30151388888889), None))
+    assert(get_date_latlon(os.path.join(dir,'eg-iphonexs - 2021.01.16 - 07.00 PST.png')) == (datetime.datetime(2021, 1, 16, 7, 0, 51), None, None, None))
+    assert(get_date_latlon(os.path.join(dir,'eg-iphonexs - 2021.01.17 - 12.18 PST.heic')) == (datetime.datetime(2021, 1, 17, 12, 18, 23, tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=57600))), None, (46.79380555555555, -124.10501944444444), None))
+    assert(get_date_latlon(os.path.join(dir,'eg-iphonexs - 2021.01.17 - 20.29 PST.mov')) == (datetime.datetime(2021, 1, 16, 20, 29, 24, tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=57600))), None, (46.7888, -124.0958), None))
+    assert(get_date_latlon(os.path.join(dir,'eg-iphonexs-memory - 2021.01.25 - 19.15 PST.mov')) == (None, datetime.datetime(2021, 1, 26, 3, 15, 25), None, None))
+    assert(get_date_latlon(os.path.join(dir,'eg-notapic.txt')) == (None, None, None, "unrecognized header b'This is '"))
+    assert(get_date_latlon(os.path.join(dir,'eg-screenshot.png')) == (None, None, None, 'No eXIf or date found in PNG'))
+    assert(get_date_latlon(os.path.join(dir,'eg-sony-cybershot - 2013.12.15 - 07.30 PST.jpg')) == (datetime.datetime(2013, 12, 15, 7, 32, 37), None, None, None))
+    assert(get_date_latlon(os.path.join(dir,'eg-sony-cybershot - 2013.12.15 - 07.30 PST.mp4')) == (datetime.datetime(2013, 12, 15, 7, 31, 51), None, None, None))
+    assert(get_date_latlon(os.path.join(dir,'eg-wm10-gps.jpg')) == (datetime.datetime(2016, 2, 15, 22, 20, 58), None, (47.63564167544167, -122.30185414664444), None))
+    assert(get_date_latlon(os.path.join(dir,'eg-wm10.mp4')) == (None, datetime.datetime(2016, 2, 25, 4, 27, 35), (47.6361, -122.3013), None))
+    assert(get_date_latlon(os.path.join(dir,'eg-wp8 - 2013.12.15 - 07.33 PST.jpg')) == (datetime.datetime(2013,12,15,7,32,50), None, (47.63610444444444, -122.30139333333334), None))
+    assert(get_date_latlon(os.path.join(dir,'eg-wp8 - 2013.12.15 - 07.33 PST.mp4')) == (None, None, None, 'mp4 metadata is missing date'))
 
 def test_place():
-    # North America
-    assert(get_place_from_latlon((47.637922, -122.301557)) == '24th Avenue East, Seattle, Washington')
-    assert(get_place_from_latlon((47.629612, -122.315119)) == 'Black Sun, Volunteer Park, Seattle, Washington')
-    assert(get_place_from_latlon((47.639483, -122.29801)) == 'Pinetum, Washington Park Arboretum, Seattle, Washington')
-    assert(get_place_from_latlon((47.65076, -122.302043)) == 'Husky Football Stadium, University of Washington, Seattle, Washington')
-    assert(get_place_from_latlon((47.668719, -122.38296)) == 'Washington Federal Bank, Ballard, Seattle, Washington')
-    assert(get_place_from_latlon((47.681006, -122.407513)) == 'Shilshole Bay Marina, Seattle, Washington')
-    assert(get_place_from_latlon((47.620415, -122.349463)) == 'Space Needle, Seattle Center, Washington')
-    assert(get_place_from_latlon((47.609839, -122.342981)) == 'Pike Place Market, Seattle, street, Washington')
-    assert(get_place_from_latlon((47.65464, -122.30843)) == 'University of Washington, District, Seattle, Washington')
-    assert(get_place_from_latlon((47.64529, -122.13064)) == 'Microsoft Building 25, Northeast 39th Street, Redmond, East Campus, Washington')
-    assert(get_place_from_latlon((48.67998, -123.23106)) == 'Lighthouse Road, San Juan County, Washington')
-    assert(get_place_from_latlon((21.97472, -159.3656)) == 'Umi Street, Lihue, Kauai, Hawaiian Islands, Southwestern, Hawaii')
-    assert(get_place_from_latlon((22.08223, -159.76265)) == 'Polihale State Park, Kauaʻi County, Kauai, Hawaiian Islands, Southwestern, Beach, Hawaii')
+    # United States
+    assert(get_place_tz_from_latlon((47.637922, -122.301557)) == ('24th Avenue East, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.629612, -122.315119)) == ('Black Sun, Volunteer Park, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.639483, -122.29801)) == ('Pinetum, Washington Park Arboretum, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.65076, -122.302043)) == ('Husky Football Stadium, University of Washington, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.668719, -122.38296)) == ('Washington Federal Bank, Ballard, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.681006, -122.407513)) == ('Shilshole Bay Marina, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.620415, -122.349463)) == ('Space Needle, Seattle Center, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.609839, -122.342981)) == ('Pike Place Market, Seattle, street, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.65464, -122.30843)) == ('University of Washington, District, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.64529, -122.13064)) == ('Microsoft Building 25, Northeast 39th Street, Redmond, East Campus, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((48.67998, -123.23106)) == ('Lighthouse Road, San Juan County, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((21.97472, -159.3656)) == ('Umi Street, Lihue, Kauai, Hawaiian Islands, Southwestern, Hawaii', 'Pacific/Honolulu'))
+    assert(get_place_tz_from_latlon((22.08223, -159.76265)) == ('Polihale State Park, Kauaʻi County, Kauai, Hawaiian Islands, Southwestern, Beach, Hawaii', 'Pacific/Honolulu'))
     # Canada
-    assert(get_place_from_latlon((49.31168, -123.14786)) == 'Stanley Park, Vancouver, British Columbia, Canada')
-    assert(get_place_from_latlon((48.56686, -123.46688)) == 'The Butchart Gardens, Central Saanich, Vancouver Island, British Columbia, Canada')
-    assert(get_place_from_latlon((48.65287, -123.34463)) == 'Gulf Islands National Park Reserve, Southern Electoral Area, Sidney Island, British Columbia, Canada')
+    assert(get_place_tz_from_latlon((49.31168, -123.14786)) == ('Stanley Park, Vancouver, British Columbia, Canada', 'America/Vancouver'))
+    assert(get_place_tz_from_latlon((48.56686, -123.46688)) == ('The Butchart Gardens, Central Saanich, Vancouver Island, British Columbia, Canada', 'America/Vancouver'))
+    assert(get_place_tz_from_latlon((48.65287, -123.34463)) == ('Gulf Islands National Park Reserve, Southern Electoral Area, Sidney Island, British Columbia, Canada', 'America/Vancouver'))
     # Europe
-    assert(get_place_from_latlon((57.14727, -2.095665)) == 'Union Street, Aberdeen, Scotland')
-    assert(get_place_from_latlon((57.169365, -2.101216)) == '16 The Chanonry, Aberdeen, Scotland')
-    assert(get_place_from_latlon((52.20234, 0.11589)) == 'Queens\' College (University of Cambridge), Newnham, England')
-    assert(get_place_from_latlon((48.858262, 2.293763)) == 'Eiffel Tower, Champ de Mars, Paris, Ile-de-France, France')
-    assert(get_place_from_latlon((41.900914, 12.483172)) == 'Trevi Fountain, Fontana di, Municipio Roma I, Rome, Rione II, Lazio, Italy')
+    assert(get_place_tz_from_latlon((57.14727, -2.095665)) == ('Union Street, Aberdeen, Scotland', 'Europe/London'))
+    assert(get_place_tz_from_latlon((57.169365, -2.101216)) == ('16 The Chanonry, Aberdeen, Scotland', 'Europe/London'))
+    assert(get_place_tz_from_latlon((52.20234, 0.11589)) == ('Queens\' College (University of Cambridge), Newnham, England', 'Europe/London'))
+    assert(get_place_tz_from_latlon((48.858262, 2.293763)) == ('Eiffel Tower, Champ de Mars, Paris, Ile-de-France, France', 'Europe/Paris'))
+    assert(get_place_tz_from_latlon((41.900914, 12.483172)) == ('Trevi Fountain, Fontana di, Municipio Roma I, Rome, Rione II, Lazio, Italy', 'Europe/Rome'))
     # Australasia
-    assert(get_place_from_latlon((-27.5014, 152.97272)) == 'Indooroopilly Shopping Centre, Brisbane City, Queensland, Australia')
-    assert(get_place_from_latlon((-33.85733, 151.21516)) == 'Playhouse Theatre, Sydney Opera House, Upper Podium, New South Wales, Australia')
-    assert(get_place_from_latlon((27.17409, 78.04171)) == 'Taj Mahal Garden, Agra, Ganga Yamuna River Basin, Uttar Pradesh, India')
-    assert(get_place_from_latlon((39.91639, 116.39023)) == 'Forbidden City, Xicheng District, Old, Beijing, China')
-    assert(get_place_from_latlon((13.41111, 103.86234)) == 'Angkor Wat, Siem Reap, Cambodia')
+    assert(get_place_tz_from_latlon((-27.5014, 152.97272)) == ('Indooroopilly Shopping Centre, Brisbane City, Queensland, Australia', 'Australia/Brisbane'))
+    assert(get_place_tz_from_latlon((-33.85733, 151.21516)) == ('Playhouse Theatre, Sydney Opera House, Upper Podium, New South Wales, Australia', 'Australia/Sydney'))
+    assert(get_place_tz_from_latlon((27.17409, 78.04171)) == ('Taj Mahal Garden, Agra, Ganga Yamuna River Basin, Uttar Pradesh, India', 'Asia/Kolkata'))
+    assert(get_place_tz_from_latlon((39.91639, 116.39023)) == ('Forbidden City, Xicheng District, Old, Beijing, China', 'Asia/Shanghai'))
+    assert(get_place_tz_from_latlon((13.41111, 103.86234)) == ('Angkor Wat, Siem Reap, Cambodia', 'Asia/Phnom_Penh'))
     # Amenity/tourism/suburb
-    assert(get_place_from_latlon((47.62676944444444, -122.30770833333332)) == 'Saint Joseph Catholic Church, Capitol Hill, Seattle, Washington')
-    assert(get_place_from_latlon((47.62659166666667, -122.30788333333334)) == 'Saint Joseph Catholic Church, Capitol Hill, Seattle, Washington')
-    assert(get_place_from_latlon((47.6264, -122.3079)) == 'Saint Joseph School, Capitol Hill, Seattle, Washington')
-    assert(get_place_from_latlon((47.62603888888889, -122.30757222222222)) == 'Saint Joseph School, Capitol Hill, Seattle, Washington')
-    assert(get_place_from_latlon((47.66171666666666, -122.29951388888888)) == 'South Garage, University Village, District, Seattle, Washington')
-    assert(get_place_from_latlon((47.66166388888889, -122.29971388888889)) == 'South Garage, University Village, District, Seattle, Washington')
-    assert(get_place_from_latlon((47.59358888888889, -122.31080555555555)) == 'Seattle Bouldering Project - SBP, Washington')
+    assert(get_place_tz_from_latlon((47.62676944444444, -122.30770833333332)) == ('Saint Joseph Catholic Church, Capitol Hill, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.62659166666667, -122.30788333333334)) == ('Saint Joseph Catholic Church, Capitol Hill, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.6264, -122.3079)) == ('Saint Joseph School, Capitol Hill, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.62603888888889, -122.30757222222222)) == ('Saint Joseph School, Capitol Hill, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.66171666666666, -122.29951388888888)) == ('South Garage, University Village, District, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.66166388888889, -122.29971388888889)) == ('South Garage, University Village, District, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.59358888888889, -122.31080555555555)) == ('Seattle Bouldering Project - SBP, Washington', 'America/Los_Angeles'))
     # Slashes and parentheses
-    assert(get_place_from_latlon((47.593136111111114, -122.33296944444444)) == 'Lumen Field Event Center, International District Chinatown, Seattle, Washington')
-    assert(get_place_from_latlon((47.59296388888889, -122.33313055555556)) == 'WaMu Theater, International District Chinatown, Seattle, Washington')
-    assert(get_place_from_latlon((46.976708333333335, -120.17369722222223)) == 'L. T. Murray Wildlife Area (Whiskey Dick Unit), Kittitas County, Washington')
+    assert(get_place_tz_from_latlon((47.593136111111114, -122.33296944444444)) == ('Lumen Field Event Center, International District Chinatown, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.59296388888889, -122.33313055555556)) == ('WaMu Theater, International District Chinatown, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((46.976708333333335, -120.17369722222223)) == ('L. T. Murray Wildlife Area (Whiskey Dick Unit), Kittitas County, Washington', 'America/Los_Angeles'))
     # Amenity/buildings/shops/retail/hamlet/historic
-    assert(get_place_from_latlon((47.82781944444445, -122.29219166666667)) == 'Lynnwood Recreation Center, Washington')
-    assert(get_place_from_latlon((47.82130555555556, -122.29823333333333)) == 'Arco, 4806 196th Street Southwest, Lynnwood, Washington')
-    assert(get_place_from_latlon((47.62366111111111, -122.33089444444444)) == 'Playdate SEA, South Lake Union, Seattle, Washington')
-    assert(get_place_from_latlon((47.623675, -122.33113055555555)) == 'Playdate SEA, Seattle, Washington')
-    assert(get_place_from_latlon((47.628819444444446, -122.34288888888888)) == 'Dexter Station, Westlake, Seattle, Washington')
-    assert(get_place_from_latlon((47.62863611111111, -122.34264444444445)) == 'Dexter Station, Westlake, Seattle, Washington')
-    assert(get_place_from_latlon((47.628825, -122.3429111111111)) == 'Dexter Station, Westlake, Seattle, Washington')
-    assert(get_place_from_latlon((47.629019444444445, -122.34124722222222)) == 'Facebook Westlake, Seattle, Washington')
-    assert(get_place_from_latlon((47.61843611111111, -122.13038611111111)) == 'WiggleWorks Kids, Bellevue, Washington')
-    assert(get_place_from_latlon((47.61853055555556, -122.1305)) == 'Crossroads, Lake Hills, Bellevue, Washington')
-    assert(get_place_from_latlon((47.662302777777775, -122.29841666666667)) == 'University Village, Coming Home, Seattle, Washington')
-    assert(get_place_from_latlon((55.527425, -5.504425)) == 'Saddell Castle, Campbeltown, Scotland')
-    assert(get_place_from_latlon((55.52716111111111, -5.505125)) == 'Saddell Castle, Campbeltown, Scotland')
-    assert(get_place_from_latlon((55.527375, -5.503855555555556)) == 'Saddell Castle, Campbeltown, Firth of Clyde, Scotland')
-    assert(get_place_from_latlon((55.42015, -5.604105555555555)) == 'Campbeltown Hospital, Dalintober, Scotland')
-    assert(get_place_from_latlon((55.42106666666666, -5.603566666666667)) == 'Campbeltown Hospital, Dalintober, Scotland')
-    assert(get_place_from_latlon((55.526913888888885, -5.504155555555555)) == 'Saddell Castle, Campbeltown, Firth of Clyde, Scotland')
-    assert(get_place_from_latlon((55.424375, -5.6054916666666665)) == 'Bank of Scotland, Dalintober, Campbeltown, Scotland')
-    assert(get_place_from_latlon((55.42735277777778, -5.605638888888889)) == 'Aqualibrum, Kinloch Public Park, Campbeltown, Scotland')
+    assert(get_place_tz_from_latlon((47.82781944444445, -122.29219166666667)) == ('Lynnwood Recreation Center, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.82130555555556, -122.29823333333333)) == ('Arco, 4806 196th Street Southwest, Lynnwood, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.62366111111111, -122.33089444444444)) == ('Playdate SEA, South Lake Union, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.623675, -122.33113055555555)) == ('Playdate SEA, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.628819444444446, -122.34288888888888)) == ('Dexter Station, Westlake, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.62863611111111, -122.34264444444445)) == ('Dexter Station, Westlake, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.628825, -122.3429111111111)) == ('Dexter Station, Westlake, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.629019444444445, -122.34124722222222)) == ('Facebook Westlake, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.61843611111111, -122.13038611111111)) == ('WiggleWorks Kids, Bellevue, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.61853055555556, -122.1305)) == ('Crossroads, Lake Hills, Bellevue, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.662302777777775, -122.29841666666667)) == ('University Village, Coming Home, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((55.527425, -5.504425)) == ('Saddell Castle, Campbeltown, Scotland', 'Europe/London'))
+    assert(get_place_tz_from_latlon((55.52716111111111, -5.505125)) == ('Saddell Castle, Campbeltown, Scotland', 'Europe/London'))
+    assert(get_place_tz_from_latlon((55.527375, -5.503855555555556)) == ('Saddell Castle, Campbeltown, Firth of Clyde, Scotland', 'Europe/London'))
+    assert(get_place_tz_from_latlon((55.42015, -5.604105555555555)) == ('Campbeltown Hospital, Dalintober, Scotland', 'Europe/London'))
+    assert(get_place_tz_from_latlon((55.42106666666666, -5.603566666666667)) == ('Campbeltown Hospital, Dalintober, Scotland', 'Europe/London'))
+    assert(get_place_tz_from_latlon((55.526913888888885, -5.504155555555555)) == ('Saddell Castle, Campbeltown, Firth of Clyde, Scotland', 'Europe/London'))
+    assert(get_place_tz_from_latlon((55.424375, -5.6054916666666665)) == ('Bank of Scotland, Dalintober, Campbeltown, Scotland', 'Europe/London'))
+    assert(get_place_tz_from_latlon((55.42735277777778, -5.605638888888889)) == ('Aqualibrum, Kinloch Public Park, Campbeltown, Scotland', 'Europe/London'))
     # Park
-    assert(get_place_from_latlon((47.54087777777777, -122.48220833333333)) == 'WA State Parks, Blake Island Marine Park, Kitsap County, Washington')
-    assert(get_place_from_latlon((47.54085277777778, -122.48735833333333)) == 'Blake Island Marine State Park, Kitsap County, Washington')
-    assert(get_place_from_latlon((47.5409, -122.4813)) == 'Blake Island Marine State Park Campground, Kitsap County, Washington')
-    assert(get_place_from_latlon((47.540863888888886, -122.48208611111112)) == 'Blake Island Marine State Park Campground, Kitsap County, Washington')
-    assert(get_place_from_latlon((47.6324, -122.3132)) == 'Volunteer Park Playground, Seattle, Washington')
-    assert(get_place_from_latlon((47.632, -122.31341666666667)) == 'Volunteer Park Playground, Seattle, Washington')
-    assert(get_place_from_latlon((47.64170555555555, -122.30924166666667)) == 'Montlake Playfield, Seattle, Washington')
-    assert(get_place_from_latlon((47.6417, -122.3094)) == 'Montlake Community Center, Playfield, Seattle, Washington')
-    assert(get_place_from_latlon((47.681777777777775, -122.24568888888889)) == 'The Fin Project From Swords into Plowshares, Seattle, Lake Washington, Washington')
-    assert(get_place_from_latlon((47.632191666666664, -122.29533333333333)) == 'Birches & Poplars, Washington Park Arboretum, Seattle, Washington')
-    assert(get_place_from_latlon((47.633716666666665, -122.29625833333333)) == 'Birches & Poplars, Washington Park Arboretum, Seattle, Washington')
+    assert(get_place_tz_from_latlon((47.54087777777777, -122.48220833333333)) == ('WA State Parks, Blake Island Marine Park, Kitsap County, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.54085277777778, -122.48735833333333)) == ('Blake Island Marine State Park, Kitsap County, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.5409, -122.4813)) == ('Blake Island Marine State Park Campground, Kitsap County, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.540863888888886, -122.48208611111112)) == ('Blake Island Marine State Park Campground, Kitsap County, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.6324, -122.3132)) == ('Volunteer Park Playground, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.632, -122.31341666666667)) == ('Volunteer Park Playground, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.64170555555555, -122.30924166666667)) == ('Montlake Playfield, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.6417, -122.3094)) == ('Montlake Community Center, Playfield, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.681777777777775, -122.24568888888889)) == ('The Fin Project From Swords into Plowshares, Seattle, Lake Washington, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.632191666666664, -122.29533333333333)) == ('Birches & Poplars, Washington Park Arboretum, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.633716666666665, -122.29625833333333)) == ('Birches & Poplars, Washington Park Arboretum, Seattle, Washington', 'America/Los_Angeles'))
     # Wilderness
-    assert(get_place_from_latlon((47.2781, -121.3185)) == 'Meany Lodge, Kittitas County, Okanogan-Wenatchee National Forest, Washington')
-    assert(get_place_from_latlon((47.28511944444444, -121.31588611111111)) == 'Forest Road 5400-420, Kittitas County, Okanogan-Wenatchee National, Washington')
-    assert(get_place_from_latlon((47.30723611111111, -121.31594166666666)) == 'Forest Road 54, Kittitas County, Okanogan-Wenatchee National, Washington')
+    assert(get_place_tz_from_latlon((47.2781, -121.3185)) == ('Meany Lodge, Kittitas County, Okanogan-Wenatchee National Forest, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.28511944444444, -121.31588611111111)) == ('Forest Road 5400-420, Kittitas County, Okanogan-Wenatchee National, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.30723611111111, -121.31594166666666)) == ('Forest Road 54, Kittitas County, Okanogan-Wenatchee National, Washington', 'America/Los_Angeles'))
     # London
-    assert(get_place_from_latlon((51.470875, -0.4868722222222222)) == 'Heathrow Terminal 5, Wayfarer Road, London, England')
-    assert(get_place_from_latlon((51.481030555555556, -0.1787638888888889)) == 'Dartrey Walk, Worlds End, London, England')
-    assert(get_place_from_latlon((51.51676111111111, -0.13645277777777778)) == 'The London EDITION, England')
-    assert(get_place_from_latlon((51.51674166666667, -0.13426944444444444)) == '1 Rathbone Square, London, England')
-    assert(get_place_from_latlon((51.5176, -0.1371)) == 'Sanderson Hotel, Fitzrovia, London, England')
-    assert(get_place_from_latlon((51.51056944444444, -0.13133611111111113)) == 'M&M\'s World, St. James\'s, London, England')
-    assert(get_place_from_latlon((51.51022777777778, -0.13242500000000001)) == 'W1D 111;W1D 311, St. James\'s, London, England')
-    assert(get_place_from_latlon((51.513755555555555, -0.13956388888888888)) == 'Shakespeare\'s Head, Soho, London, England')
-    assert(get_place_from_latlon((51.51390555555555, -0.13997777777777778)) == 'Liberty, Soho, London, England')
-    assert(get_place_from_latlon((51.51343611111111, -0.07898333333333334)) == 'Guild Church of St Katharine Cree, 86 Leadenhall Street, London, England')
+    assert(get_place_tz_from_latlon((51.470875, -0.4868722222222222)) == ('Heathrow Terminal 5, Wayfarer Road, London, England', 'Europe/London'))
+    assert(get_place_tz_from_latlon((51.481030555555556, -0.1787638888888889)) == ('Dartrey Walk, Worlds End, London, England', 'Europe/London'))
+    assert(get_place_tz_from_latlon((51.51676111111111, -0.13645277777777778)) == ('The London EDITION, England', 'Europe/London'))
+    assert(get_place_tz_from_latlon((51.51674166666667, -0.13426944444444444)) == ('1 Rathbone Square, London, England', 'Europe/London'))
+    assert(get_place_tz_from_latlon((51.5176, -0.1371)) == ('Sanderson Hotel, Fitzrovia, London, England', 'Europe/London'))
+    assert(get_place_tz_from_latlon((51.51056944444444, -0.13133611111111113)) == ('M&M\'s World, St. James\'s, London, England', 'Europe/London'))
+    assert(get_place_tz_from_latlon((51.51022777777778, -0.13242500000000001)) == ('W1D 111;W1D 311, St. James\'s, London, England', 'Europe/London'))
+    assert(get_place_tz_from_latlon((51.513755555555555, -0.13956388888888888)) == ('Shakespeare\'s Head, Soho, London, England', 'Europe/London'))
+    assert(get_place_tz_from_latlon((51.51390555555555, -0.13997777777777778)) == ('Liberty, Soho, London, England', 'Europe/London'))
+    assert(get_place_tz_from_latlon((51.51343611111111, -0.07898333333333334)) == ('Guild Church of St Katharine Cree, 86 Leadenhall Street, London, England', 'Europe/London'))
 
 
 if len(sys.argv) <= 1:
@@ -756,7 +773,7 @@ elif sys.argv[1] == '--test':
     test_place()
 elif sys.argv[1] == '--debug':
     # I stick in here whatever I'm debugging at the moment
-    print(get_place_from_latlon((47.639483, -122.29801)))
+    print(get_place_tz_from_latlon((47.639483, -122.29801)))
 else:
     try:
         (count_processed, count_error, count_renamed) = (0, 0, 0)
@@ -766,13 +783,20 @@ else:
             pattern = re.compile('^\d\d\d\d.\d\d.\d\d - \d\d.\d\d.\d\d - (.*)$')
             match = pattern.match(srcname)
             stuff = match.group(1) if match else srcname
-            (date, latlon, err) = get_date_latlon(src)
+            (date, utc, latlon, err) = get_date_latlon(src)
+            (stuff, tz) = (stuff, None) if latlon is None else get_place_tz_from_latlon(latlon)
             count_processed += 1
-            if date is None:
+            if date is None and utc is not None and tz is not None:
+                date = utc.replace(tzinfo=datetime.timezone.utc).astimezone(tz)
+            if date is None and utc is not None:
+                err = 'To convert utc, \'pip3 install pytz\'' if latlon is not None and tz is None and 'pytz' not in sys.modules else ''                    
+                print(f'{srcname}{ext}  *** only has utc time; skipping. {err}')
+                count_error += 1
+                continue
+            elif date is None:
                 print(f'{srcname}{ext}  *** {err}', file=sys.stderr)
                 count_error += 1
                 continue
-            stuff = stuff if latlon is None else get_place_from_latlon(latlon)
             # in case of filename clash, we'll append a suffix
             suffix = 1
             while True:
@@ -783,7 +807,10 @@ else:
                 else:
                     break
             if src != dst:
-                print(f'{dstname}{ext}{"  *** " + err if err is not None else ""}', file=sys.stderr if err is not None else sys.stdout)
+                if err is None:
+                    print(f'{dstname}{ext}')
+                else:
+                    print(f'{dstname}{ext}  *** {err}', file=sys.stderr)
                 os.rename(src, dst)
                 count_renamed += 1
         if count_processed == 0:
