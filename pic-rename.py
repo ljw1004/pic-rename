@@ -529,11 +529,11 @@ def get_place_tz_from_latlon(latlon : Tuple[float, float]) -> Tuple[str,Optional
     addressparts1 = xml1.find(".//addressparts")
     for apart in (list(addressparts1) if addressparts1 is not None else []):
         if apart.text is not None:
-            atag = 'tourism' if apart.tag in ['leisure', 'aeroway', 'historic'] else 'amenity' if apart.tag in ['building', 'shop', 'retail'] else 'suburb' if apart.tag in ['hamlet'] else apart.tag
+            atag = 'tourism' if apart.tag in ['leisure', 'aeroway', 'historic'] else 'amenity' if apart.tag in ['building', 'shop', 'retail', 'office'] else 'suburb' if apart.tag in ['hamlet'] else apart.tag
             parts1.append((atag, apart.text))
     # I disagree with the way London is stored...
     if ('state_district', 'Greater London') in parts1:
-        parts1.append(('city','London'))    
+        parts1.append(('city','London'))
 
     # Overpass provides some additional tags that are sometimes missing from Nominatim.
     parts2 : List[Tuple[str,str]] = []
