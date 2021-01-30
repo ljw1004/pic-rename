@@ -790,11 +790,11 @@ else:
                 date = utc.replace(tzinfo=datetime.timezone.utc).astimezone(tz)
             if date is None and utc is not None:
                 err = 'To convert utc, \'pip3 install pytz\'' if latlon is not None and tz is None and 'pytz' not in sys.modules else ''                    
-                print(f'{srcname}{ext}  *** only has utc time; skipping. {err}')
+                print(f'{src}  *** only has utc time; skipping. {err}')
                 count_error += 1
                 continue
             elif date is None:
-                print(f'{srcname}{ext}  *** {err}', file=sys.stderr)
+                print(f'{src}  *** {err}', file=sys.stderr)
                 count_error += 1
                 continue
             # in case of filename clash, we'll append a suffix
@@ -808,9 +808,9 @@ else:
                     break
             if src != dst:
                 if err is None:
-                    print(f'{dstname}{ext}')
+                    print(f'{dst}')
                 else:
-                    print(f'{dstname}{ext}  *** {err}', file=sys.stderr)
+                    print(f'{dst}  *** {err}', file=sys.stderr)
                 os.rename(src, dst)
                 count_renamed += 1
         if count_processed == 0:
