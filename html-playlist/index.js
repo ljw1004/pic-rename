@@ -50,14 +50,17 @@ function relogin() {
 async function generate() {
     try {
         document.getElementById('generate').disabled = true;
+        document.getElementById('playlistid').style.display = 'none';
 
         // We'll share the music folder, allowing public links to any item inside it
         const driveId = (JSON.parse(await fetchStringAsync('GET', `https://graph.microsoft.com/v1.0/me/drive`))).id;
         const linkRequest = JSON.stringify({type: 'view', scope: 'anonymous'});
-        const shareUrl = JSON.parse(await fetchStringAsync('POST', `https://graph.microsoft.com/v1.0/me/drive/items/${MUSIC_FOLDER_ID}/createLink`, linkRequest, 'application/json')).link.webUrl;
-        // TODO: write a web-service which fetches (without redirect) that shareUrl, gets the 301 response, and tells us the resid and authkey query params of the redirect url
-        const resid = 'TODO';
-        const authkey = 'TODO';
+        const shareUrl = new URL(JSON.parse(await fetchStringAsync('POST', `https://graph.microsoft.com/v1.0/me/drive/items/${MUSIC_FOLDER_ID}/createLink`, linkRequest, 'application/json')).link.webUrl);        
+        const redirectUrl = new URL(await fetchStringAsync('GET', `/get-onedrive-redirect/?share=${shareUrl.pathname.replace(/^\//,'')}`, null, null, null));
+        // shareUrl is like 'https://1drv.ms/u/s!abcdef'. We send it to 'https://unto.me/get-onedrive-redirect/?share=u/s!abcdef'.
+        // This will fetch the shareUrl, intercept the 301 response, and give us back the Location header of that 301 as the response body,
+        // e.g. 'https://onedrive.live.com/redir?resid=abc&authkey=def'
+        const [resid, authkey] = [redirectUrl.searchParams.get('resid'), redirectUrl.searchParams.get('authkey')];
         // the following function, given a path under the Music folder like ['Blues', 'Beat Box.mp3'], generates a shared onedrive link to it.
         const link = (path) => `https://api.onedrive.com/v1.0/drives/${driveId}/items/${resid}:/${path.map(encodeURIComponent).join('/')}:/content?authKey=${authkey}`;
 
@@ -115,9 +118,10 @@ async function walkFolderAsync(acc, path, folderId, bytesSoFar, bytesTotal, star
  * @param {string|URL} url - the URL to fetch
  * @param {string} [requestBody] - the request body
  * @param {string} [requestContentType] - the type of the request body, e.g. "application/json"
+ * @param {string} [authorizationBearer] - value for "Authorization: Bearer ..." header - defaults to global variable ACCESS_TOKEN
  * @returns {string} - the XMLHttpRequest.responseText returned
  */
- function fetchStringAsync(verb, url, requestBody, requestContentType) {
+ function fetchStringAsync(verb, url, requestBody, requestContentType, authorizationBearer = ACCESS_TOKEN) {
     return new Promise((resolve, reject) => {
         try {
             const xhr = new XMLHttpRequest();
@@ -133,8 +137,8 @@ async function walkFolderAsync(acc, path, folderId, bytesSoFar, bytesTotal, star
                 reject(e);
             }
             xhr.open(verb, url, true);
-            if (ACCESS_TOKEN) {
-                xhr.setRequestHeader('Authorization', `Bearer ${encodeURIComponent(ACCESS_TOKEN)}`);
+            if (authorizationBearer) {
+                xhr.setRequestHeader('Authorization', `Bearer ${encodeURIComponent(authorizationBearer)}`);
             }
             if (requestContentType) {
                 xhr.setRequestHeader('Content-Type', requestContentType);
