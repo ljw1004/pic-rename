@@ -1,0 +1,11 @@
+#browser {display: flex; flex-wrap: wrap;align-items: stretch; gap: 1em; margin: 0; border: solid thin gray;}
+#browser > div {height: 32ex; overflow-y: auto; border-right: solid thin gray;}
+#browser > div > p {max-width: 12em; overflow-x: hidden; text-overflow: ellipsis; margin: 0; cursor: pointer;}
+#browser > div > p[data-selected="1"] {background-color: lightblue;}
+.spinner {cursor: wait; display: inline-block; width: 2ex; height: 2ex; border: thin solid gray; border-radius: 50%; border-top-color: white; animation: spin 1s ease-in-out infinite; -webkit-animation: spin 1s ease-in-out infinite; }
+@keyframes spin {to { -webkit-transform: rotate(360deg); }}
+@-webkit-keyframes spin {to { -webkit-transform: rotate(360deg); }}
+.logitem .name {vertical-align: bottom;}
+.logitem .result {vertical-align: top;}
+.logitem .info {margin: 0; font-size: small; color: gray;}
+.error {color: red;}

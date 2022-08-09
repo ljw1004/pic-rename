@@ -1,0 +1,21 @@
+<html>
+<script src="index.js"></script>
+<link href="index.css" rel="stylesheet">
+<style type="text/css">
+</style>
+<body>
+<h1>Pic-rename</h1>
+<div id="browser"></div>
+<p><button id="rename" disabled>Rename...</button><button id="login" style="display:none;" onclick="relogin()">Login...</button></p>
+
+<div id="log">
+This is to rename all the selected folder's photos and videos to names of the form <code style="background-color:cyan;">Date - Time - Place.ext</code>.
+<ul>
+<li><strong>Why do this?</strong> Some people find it easier if their photo filenames show when+where.</li>
+<li><strong>This is slow!</strong> It takes ~10s/file, mainly just downloading the file from OneDrive. Maybe leave it running overnight...</li>
+<li><strong>It only works for phones+cameras.</strong>. It looks for the metadata recorded by the phone/camera about when and where the photo was taken. (This metadata is absent from photoshop'd files, and screenshots, and many online files).</li>
+</ul>
+</div>
+
+</body>
+</html>

@@ -76,7 +76,7 @@ def read_date(file: IO[bytes], pos:int, nbytes:int) -> Optional[datetime.datetim
 
 def exif_get_date_latlon_from_bom(file: IO[bytes], pos:int, end:int) -> Tuple[Optional[datetime.datetime], Optional[datetime.datetime], Optional[Tuple[float, float]], Optional[str]]:    
     latNS : Optional[str] = None
-    latEW : Optional[str] = None
+    lonEW : Optional[str] = None
     latNum : Optional[float] = None
     lonNum : Optional[float] = None
     timeLastModified : Optional[str] = None
@@ -177,7 +177,7 @@ def exif_get_date_latlon_from_bom(file: IO[bytes], pos:int, end:int) -> Tuple[Op
     latlon : Optional[Tuple[float,float]] = None
     if latNum is not None and latNS is not None and lonNum is not None and lonEW is not None:
         lat = latNum * (1 if latNS == 'N' else -1)
-        lon = lonNum * (1 if latEW == 'E' else -1)
+        lon = lonNum * (1 if lonEW == 'E' else -1)
         latlon = (lat, lon)
     return (date, None, latlon, None)
 
@@ -380,11 +380,11 @@ def get_mp4_date_latlon(file: IO[bytes], pos:int, end:int) -> Tuple[Optional[dat
     if cnth + 16 <= cnth_end:
         return get_exif_date_latlon(file, cnth+8, cnth_end)
     
-    # The optional "moov.udta.©xyz" blob consists of len (2bytes), lang (2bytes), iso6709 gps (size bytes)
+    # The optional "moov.udta.©xyz" blob consists of len (2bytes), lang (2bytes), iso6709 gps (len bytes)
     (cxyz_kind, cxyz, cxyz_end) = mp4_find_box(file, b'\xA9xyz', udta, udta_end)
     if cxyz + 4 <= cxyz_end:
         cxyz_len = read_int(file, cxyz+0, 2)
-        if cxyz + cxyz_len <= cxyz_end:
+        if cxyz + 4 + cxyz_len <= cxyz_end:
             cxyz_str = read_string(file, cxyz+4, cxyz_len, 'utf-8')
             latlon = parse_iso6709(cxyz_str)
 
@@ -529,7 +529,7 @@ def get_place_tz_from_latlon(latlon : Tuple[float, float]) -> Tuple[str,Optional
     addressparts1 = xml1.find(".//addressparts")
     for apart in (list(addressparts1) if addressparts1 is not None else []):
         if apart.text is not None:
-            atag = 'tourism' if apart.tag in ['leisure', 'aeroway', 'historic'] else 'amenity' if apart.tag in ['building', 'shop', 'retail', 'office'] else 'suburb' if apart.tag in ['hamlet'] else apart.tag
+            atag = 'tourism' if apart.tag in ['leisure', 'aeroway', 'historic'] else 'amenity' if apart.tag in ['building', 'shop', 'retail', 'office', 'commercial'] else 'suburb' if apart.tag in ['hamlet'] else apart.tag
             parts1.append((atag, apart.text))
     # I disagree with the way London is stored...
     if ('state_district', 'Greater London') in parts1:
@@ -541,7 +541,7 @@ def get_place_tz_from_latlon(latlon : Tuple[float, float]) -> Tuple[str,Optional
     raw2 = urlopen_and_retry_on_busy(url2)
     xml2 = ET.fromstring(raw2)
     tz2 : Optional[datetime.tzinfo] = None
-    for area in xml2.iterfind(".//area"):  # e.g. <area><tag k="admin_level" v="1"/><tag k="name" v='Creedon"/></area>
+    for area in [*xml2.iterfind(".//area"), *xml2.iterfind(".//way")]:  # e.g. <area><tag k="admin_level" v="1"/><tag k="name" v='Creedon"/></area>
         tags : Dict[str,str] = { tag.get('k','_') : tag.get('v','_') for tag in area.iterfind(".//tag") if tag.get('k') is not None and tag.get('v') is not None} # {type:boundary, boundary:administrative, admin_level:1, name:fred}
         name = tags.get('name:en') if tags.get('name:en') is not None else tags.get('name')
         area_type = tags.get('type')
@@ -552,6 +552,8 @@ def get_place_tz_from_latlon(latlon : Tuple[float, float]) -> Tuple[str,Optional
                 tz2 = pytz.timezone(tags['timezone'])
             except pytz.UnknownTimeZoneError:
                 pass
+        if 'timezone' in tags and tz2 is None:
+            tz2 = tags['timezone']
         if name is None:
             pass
         elif area_type == 'boundary' and boundary == 'administrative' and admin_level is not None:
@@ -672,31 +674,31 @@ def test_place():
     assert(get_place_tz_from_latlon((47.637922, -122.301557)) == ('24th Avenue East, Seattle, Washington', 'America/Los_Angeles'))
     assert(get_place_tz_from_latlon((47.629612, -122.315119)) == ('Black Sun, Volunteer Park, Seattle, Washington', 'America/Los_Angeles'))
     assert(get_place_tz_from_latlon((47.639483, -122.29801)) == ('Pinetum, Washington Park Arboretum, Seattle, Washington', 'America/Los_Angeles'))
-    assert(get_place_tz_from_latlon((47.65076, -122.302043)) == ('Husky Football Stadium, University of Washington, Seattle, Washington', 'America/Los_Angeles'))
-    assert(get_place_tz_from_latlon((47.668719, -122.38296)) == ('Washington Federal Bank, Ballard, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.65076, -122.302043)) == ('University of Washington, Husky Stadium, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.668719, -122.38296)) == ('WaFd Bank, Ballard, Seattle, Washington', 'America/Los_Angeles'))
     assert(get_place_tz_from_latlon((47.681006, -122.407513)) == ('Shilshole Bay Marina, Seattle, Washington', 'America/Los_Angeles'))
     assert(get_place_tz_from_latlon((47.620415, -122.349463)) == ('Space Needle, Seattle Center, Washington', 'America/Los_Angeles'))
-    assert(get_place_tz_from_latlon((47.609839, -122.342981)) == ('Pike Place Market, Seattle, street, Washington', 'America/Los_Angeles'))
-    assert(get_place_tz_from_latlon((47.65464, -122.30843)) == ('University of Washington, District, Seattle, Washington', 'America/Los_Angeles'))
-    assert(get_place_tz_from_latlon((47.64529, -122.13064)) == ('Microsoft Building 25, Northeast 39th Street, Redmond, East Campus, Washington', 'America/Los_Angeles'))
-    assert(get_place_tz_from_latlon((48.67998, -123.23106)) == ('Lighthouse Road, San Juan County, Washington', 'America/Los_Angeles'))
-    assert(get_place_tz_from_latlon((21.97472, -159.3656)) == ('Umi Street, Lihue, Kauai, Hawaiian Islands, Southwestern, Hawaii', 'Pacific/Honolulu'))
+    assert(get_place_tz_from_latlon((47.609839, -122.342981)) == ('Pike Place Market Area, Belltown, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.65464, -122.30843)) == ('University of Washington, West Campus, Seattle, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.64529, -122.13064)) == ('Microsoft Building 25, Redmond East Campus, 15700 Northeast 39th Street, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((48.67998, -123.23106)) == ('Lighthouse Road, San Juan County, Haro Strait, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((21.97472, -159.3656)) == ('Wilcox Elementary School, 4319 Hardy Street, Lihue, Kauai, Hawaiian Islands, Southwestern, Hawaii', 'Pacific/Honolulu'))
     assert(get_place_tz_from_latlon((22.08223, -159.76265)) == ('Polihale State Park, Kauaʻi County, Kauai, Hawaiian Islands, Southwestern, Beach, Hawaii', 'Pacific/Honolulu'))
     # Canada
     assert(get_place_tz_from_latlon((49.31168, -123.14786)) == ('Stanley Park, Vancouver, British Columbia, Canada', 'America/Vancouver'))
-    assert(get_place_tz_from_latlon((48.56686, -123.46688)) == ('The Butchart Gardens, Central Saanich, Vancouver Island, British Columbia, Canada', 'America/Vancouver'))
+    assert(get_place_tz_from_latlon((48.56686, -123.46688)) == ('The Butchart Gardens, Central Saanich, Vancouver Island, Greater Victoria, British Columbia, Canada', 'America/Vancouver'))
     assert(get_place_tz_from_latlon((48.65287, -123.34463)) == ('Gulf Islands National Park Reserve, Southern Electoral Area, Sidney Island, British Columbia, Canada', 'America/Vancouver'))
     # Europe
-    assert(get_place_tz_from_latlon((57.14727, -2.095665)) == ('Union Street, Aberdeen, Scotland', 'Europe/London'))
-    assert(get_place_tz_from_latlon((57.169365, -2.101216)) == ('16 The Chanonry, Aberdeen, Scotland', 'Europe/London'))
-    assert(get_place_tz_from_latlon((52.20234, 0.11589)) == ('Queens\' College (University of Cambridge), Newnham, England', 'Europe/London'))
-    assert(get_place_tz_from_latlon((48.858262, 2.293763)) == ('Eiffel Tower, Champ de Mars, Paris, Ile-de-France, France', 'Europe/Paris'))
-    assert(get_place_tz_from_latlon((41.900914, 12.483172)) == ('Trevi Fountain, Fontana di, Municipio Roma I, Rome, Rione II, Lazio, Italy', 'Europe/Rome'))
+    assert(get_place_tz_from_latlon((57.14727, -2.095665)) == ('City News Convenience, Merchant Quarter, Centre, Aberdeen, Scotland', 'Europe/London'))
+    assert(get_place_tz_from_latlon((57.169365, -2.101216)) == ('Birse Manse, Old Aberdeen, City, Scotland', 'Europe/London'))
+    assert(get_place_tz_from_latlon((52.20234, 0.11589)) == ('Queens\' College (University of Cambridge), Newnham, Cambridgeshire, England', 'Europe/London'))
+    assert(get_place_tz_from_latlon((48.858262, 2.293763)) == ('Eiffel Tower, Field of Mars, Paris, Ile-de-France, France', 'Europe/Paris'))
+    assert(get_place_tz_from_latlon((41.900914, 12.483172)) == ('Trevi Fountain, Municipio Roma I, Rome, Lazio, Italy', 'Europe/Rome'))
     # Australasia
     assert(get_place_tz_from_latlon((-27.5014, 152.97272)) == ('Indooroopilly Shopping Centre, Brisbane City, Queensland, Australia', 'Australia/Brisbane'))
-    assert(get_place_tz_from_latlon((-33.85733, 151.21516)) == ('Playhouse Theatre, Sydney Opera House, Upper Podium, New South Wales, Australia', 'Australia/Sydney'))
-    assert(get_place_tz_from_latlon((27.17409, 78.04171)) == ('Taj Mahal Garden, Agra, Ganga Yamuna River Basin, Uttar Pradesh, India', 'Asia/Kolkata'))
-    assert(get_place_tz_from_latlon((39.91639, 116.39023)) == ('Forbidden City, Xicheng District, Old, Beijing, China', 'Asia/Shanghai'))
+    assert(get_place_tz_from_latlon((-33.85733, 151.21516)) == ('Sydney Opera House, Upper Podium, New South Wales, Australia', 'Australia/Sydney'))
+    assert(get_place_tz_from_latlon((27.17409, 78.04171)) == ('Taj Mahal Mughal Garden, Agra, Ganga Yamuna River Basin, Uttar Pradesh, India', 'Asia/Kolkata'))
+    assert(get_place_tz_from_latlon((39.91639, 116.39023)) == ('Forbidden City, Dongcheng District, Beijing, China', 'Asia/Shanghai'))
     assert(get_place_tz_from_latlon((13.41111, 103.86234)) == ('Angkor Wat, Siem Reap, Cambodia', 'Asia/Phnom_Penh'))
     # Amenity/tourism/suburb
     assert(get_place_tz_from_latlon((47.62676944444444, -122.30770833333332)) == ('Saint Joseph Catholic Church, Capitol Hill, Seattle, Washington', 'America/Los_Angeles'))
@@ -709,9 +711,9 @@ def test_place():
     # Slashes and parentheses
     assert(get_place_tz_from_latlon((47.593136111111114, -122.33296944444444)) == ('Lumen Field Event Center, International District Chinatown, Seattle, Washington', 'America/Los_Angeles'))
     assert(get_place_tz_from_latlon((47.59296388888889, -122.33313055555556)) == ('WaMu Theater, International District Chinatown, Seattle, Washington', 'America/Los_Angeles'))
-    assert(get_place_tz_from_latlon((46.976708333333335, -120.17369722222223)) == ('L. T. Murray Wildlife Area (Whiskey Dick Unit), Kittitas County, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((46.976708333333335, -120.17369722222223)) == ('Whiskey Dick Wildlife Area, Kittitas County, Washington', 'America/Los_Angeles'))
     # Amenity/buildings/shops/retail/hamlet/historic
-    assert(get_place_tz_from_latlon((47.82781944444445, -122.29219166666667)) == ('Lynnwood Recreation Center, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.82781944444445, -122.29219166666667)) == ('44th Avenue West, Lynnwood, Washington', 'America/Los_Angeles'))
     assert(get_place_tz_from_latlon((47.82130555555556, -122.29823333333333)) == ('Arco, 4806 196th Street Southwest, Lynnwood, Washington', 'America/Los_Angeles'))
     assert(get_place_tz_from_latlon((47.62366111111111, -122.33089444444444)) == ('Playdate SEA, South Lake Union, Seattle, Washington', 'America/Los_Angeles'))
     assert(get_place_tz_from_latlon((47.623675, -122.33113055555555)) == ('Playdate SEA, Seattle, Washington', 'America/Los_Angeles'))
@@ -720,7 +722,7 @@ def test_place():
     assert(get_place_tz_from_latlon((47.628825, -122.3429111111111)) == ('Dexter Station, Westlake, Seattle, Washington', 'America/Los_Angeles'))
     assert(get_place_tz_from_latlon((47.629019444444445, -122.34124722222222)) == ('Facebook Westlake, Seattle, Washington', 'America/Los_Angeles'))
     assert(get_place_tz_from_latlon((47.61843611111111, -122.13038611111111)) == ('WiggleWorks Kids, Bellevue, Washington', 'America/Los_Angeles'))
-    assert(get_place_tz_from_latlon((47.61853055555556, -122.1305)) == ('Crossroads, Lake Hills, Bellevue, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.61853055555556, -122.1305)) == ('WiggleWorks Kids, Bellevue, Washington', 'America/Los_Angeles'))
     assert(get_place_tz_from_latlon((47.662302777777775, -122.29841666666667)) == ('University Village, Coming Home, Seattle, Washington', 'America/Los_Angeles'))
     assert(get_place_tz_from_latlon((55.527425, -5.504425)) == ('Saddell Castle, Campbeltown, Scotland', 'Europe/London'))
     assert(get_place_tz_from_latlon((55.52716111111111, -5.505125)) == ('Saddell Castle, Campbeltown, Scotland', 'Europe/London'))
@@ -731,7 +733,7 @@ def test_place():
     assert(get_place_tz_from_latlon((55.424375, -5.6054916666666665)) == ('Bank of Scotland, Dalintober, Campbeltown, Scotland', 'Europe/London'))
     assert(get_place_tz_from_latlon((55.42735277777778, -5.605638888888889)) == ('Aqualibrum, Kinloch Public Park, Campbeltown, Scotland', 'Europe/London'))
     # Park
-    assert(get_place_tz_from_latlon((47.54087777777777, -122.48220833333333)) == ('WA State Parks, Blake Island Marine Park, Kitsap County, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.54087777777777, -122.48220833333333)) == ('Blake Island Marine State Park Campground, Kitsap County, Washington', 'America/Los_Angeles'))
     assert(get_place_tz_from_latlon((47.54085277777778, -122.48735833333333)) == ('Blake Island Marine State Park, Kitsap County, Washington', 'America/Los_Angeles'))
     assert(get_place_tz_from_latlon((47.5409, -122.4813)) == ('Blake Island Marine State Park Campground, Kitsap County, Washington', 'America/Los_Angeles'))
     assert(get_place_tz_from_latlon((47.540863888888886, -122.48208611111112)) == ('Blake Island Marine State Park Campground, Kitsap County, Washington', 'America/Los_Angeles'))
@@ -743,17 +745,17 @@ def test_place():
     assert(get_place_tz_from_latlon((47.632191666666664, -122.29533333333333)) == ('Birches & Poplars, Washington Park Arboretum, Seattle, Washington', 'America/Los_Angeles'))
     assert(get_place_tz_from_latlon((47.633716666666665, -122.29625833333333)) == ('Birches & Poplars, Washington Park Arboretum, Seattle, Washington', 'America/Los_Angeles'))
     # Wilderness
-    assert(get_place_tz_from_latlon((47.2781, -121.3185)) == ('Meany Lodge, Kittitas County, Okanogan-Wenatchee National Forest, Washington', 'America/Los_Angeles'))
-    assert(get_place_tz_from_latlon((47.28511944444444, -121.31588611111111)) == ('Forest Road 5400-420, Kittitas County, Okanogan-Wenatchee National, Washington', 'America/Los_Angeles'))
-    assert(get_place_tz_from_latlon((47.30723611111111, -121.31594166666666)) == ('Forest Road 54, Kittitas County, Okanogan-Wenatchee National, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.2781, -121.3185)) == ('Meany Lodge, Kittitas County, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.28511944444444, -121.31588611111111)) == ('Forest Road 5400-420, Kittitas County, Washington', 'America/Los_Angeles'))
+    assert(get_place_tz_from_latlon((47.30723611111111, -121.31594166666666)) == ('Forest Road 54, Kittitas County, Washington', 'America/Los_Angeles'))
     # London
-    assert(get_place_tz_from_latlon((51.470875, -0.4868722222222222)) == ('Heathrow Terminal 5, Wayfarer Road, London, England', 'Europe/London'))
-    assert(get_place_tz_from_latlon((51.481030555555556, -0.1787638888888889)) == ('Dartrey Walk, Worlds End, London, England', 'Europe/London'))
+    assert(get_place_tz_from_latlon((51.470875, -0.4868722222222222)) == ('Heathrow Terminal 5, Walrus Road, London, Airport, England', 'Europe/London'))
+    assert(get_place_tz_from_latlon((51.481030555555556, -0.1787638888888889)) == ('Dartrey Walk, World\'s End, London, England', 'Europe/London'))
     assert(get_place_tz_from_latlon((51.51676111111111, -0.13645277777777778)) == ('The London EDITION, England', 'Europe/London'))
-    assert(get_place_tz_from_latlon((51.51674166666667, -0.13426944444444444)) == ('1 Rathbone Square, London, England', 'Europe/London'))
-    assert(get_place_tz_from_latlon((51.5176, -0.1371)) == ('Sanderson Hotel, Fitzrovia, London, England', 'Europe/London'))
+    assert(get_place_tz_from_latlon((51.51674166666667, -0.13426944444444444)) == ('Meta, Covent Garden, London, England', 'Europe/London'))
+    assert(get_place_tz_from_latlon((51.5176, -0.1371)) == ('Sanderson Hotel, Mayfair, London, England', 'Europe/London'))
     assert(get_place_tz_from_latlon((51.51056944444444, -0.13133611111111113)) == ('M&M\'s World, St. James\'s, London, England', 'Europe/London'))
-    assert(get_place_tz_from_latlon((51.51022777777778, -0.13242500000000001)) == ('W1D 111;W1D 311, St. James\'s, London, England', 'Europe/London'))
+    assert(get_place_tz_from_latlon((51.51022777777778, -0.13242500000000001)) == ('Royal Mail, St. James\'s, London, England', 'Europe/London'))
     assert(get_place_tz_from_latlon((51.513755555555555, -0.13956388888888888)) == ('Shakespeare\'s Head, Soho, London, England', 'Europe/London'))
     assert(get_place_tz_from_latlon((51.51390555555555, -0.13997777777777778)) == ('Liberty, Soho, London, England', 'Europe/London'))
     assert(get_place_tz_from_latlon((51.51343611111111, -0.07898333333333334)) == ('Guild Church of St Katharine Cree, 86 Leadenhall Street, London, England', 'Europe/London'))
@@ -773,7 +775,7 @@ elif sys.argv[1] == '--test':
     test_place()
 elif sys.argv[1] == '--debug':
     # I stick in here whatever I'm debugging at the moment
-    print(get_place_tz_from_latlon((47.639483, -122.29801)))
+    print(get_place_tz_from_latlon((47.609839, -122.342981)))
 else:
     try:
         (count_processed, count_error, count_renamed) = (0, 0, 0)
