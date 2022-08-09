@@ -33,6 +33,7 @@ onload = async () => {
         document.getElementById("login").style.display = 'inline';
         return;
     }
+    document.getElementById('logout').style.display = 'block';
     
     populateBrowser(0, null);
     try {

@@ -19,6 +19,7 @@ onload = async () => {
         document.getElementById("login").style.display = 'inline';
         return;
     }
+    document.getElementById('logout').style.display = 'block';
 
     try {
         MUSIC_FOLDER_ID = JSON.parse(await fetchStringAsync('GET', `https://graph.microsoft.com/v1.0/me/drive/special/music`)).id;
