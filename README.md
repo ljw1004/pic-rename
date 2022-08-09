@@ -1,6 +1,11 @@
 # pic-rename.py
 
-Usage: `pic-rename.py <files>`. This will renames photos to this kind of format:
+<ul>
+<li>Online: <a href="https://unto.me/pic-rename/">https://unto.me/pic-rename/</a> (works on a OneDrive folder)
+<li>Command-line: `pic-rename.py <files>` (works on files you've downloaded locally)
+</ul>
+
+This tool renames photos to this kind of format:
 * *Year - LocalTime(24hr) - Place.ext*
 * 2021.01.25 - 21.05.49 - 24th Avenue East, Washington.heic
 * 2019.12.20 - 12.34.12 - Black Sun, Volunteer Park, Seattle, Washington.jpg
